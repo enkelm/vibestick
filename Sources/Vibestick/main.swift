@@ -1489,7 +1489,7 @@ struct OverlayView: View {
                     .lineLimit(1)
             }
             HStack(spacing: 8) {
-                Text("Back opens this overlay · Start switches apps")
+                Text("Hold L3 for app wheel · A opens · B closes")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -1560,22 +1560,30 @@ struct KeyCaptureSheet: View {
 
 @MainActor
 final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
+    private static let appWheelHoldDuration = 0.65
+
     let state = ProfileStore()
     let visual = ControllerVisualState()
     private var reader: ControllerReader!
     private var actions: MacActions!
     private var overlay: OverlayController!
+    private var appWheel: AppWheelController!
     private var statusItem: NSStatusItem!
     private var outputMenuItem: NSMenuItem?
     private var outputEnabled = false
     private var workspaceObserver: NSObjectProtocol?
     private var refreshTimer: Timer?
+    private var appWheelHoldTimer: Timer?
+    private var appWheelHoldTriggered = false
+    private var appWheelSessionActive = false
+    private var appWheelSuppressedButtons: Set<PadButton> = []
     private var held: Set<PadButton> = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("Vibestick started")
         actions = MacActions(state: state)
         overlay = OverlayController(state: state, visual: visual)
+        appWheel = AppWheelController(state: state)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "⌘ Pad"
         statusItem.menu = makeMenu()
@@ -1614,6 +1622,8 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         releaseHeld()
+        appWheelHoldTimer?.invalidate()
+        appWheel?.close()
         refreshTimer?.invalidate()
         if let workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
@@ -1624,6 +1634,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(withTitle: "Open bindings overlay", action: #selector(openOverlay), keyEquivalent: "")
+        menu.addItem(withTitle: "Toggle app wheel", action: #selector(toggleAppWheel), keyEquivalent: "")
         let outputItem = menu.addItem(withTitle: "Enable output", action: #selector(toggleOutput), keyEquivalent: "")
         outputItem.state = .off
         outputMenuItem = outputItem
@@ -1639,6 +1650,15 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
 
     @objc private func openOverlay() {
         overlay.toggle()
+    }
+
+    @objc private func toggleAppWheel() {
+        if appWheelSessionActive || appWheel.isVisible {
+            appWheel.cancel()
+            endAppWheelSessionIfIdle()
+        } else {
+            _ = beginAppWheelSession()
+        }
     }
 
     @objc private func toggleOutput() {
@@ -1665,7 +1685,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         let permission = state.accessibilityGranted ? "Keyboard output: allowed" : "Keyboard output: Accessibility required"
         let alert = NSAlert()
         alert.messageText = "Vibestick status"
-        alert.informativeText = "\(deviceText)\n\n\(permission)\nOutput: \(outputEnabled ? "enabled" : "off")\nOwner: standalone Vibestick\n\nStop Herdr's gamepad plugin before enabling this listener."
+        alert.informativeText = "\(deviceText)\n\n\(permission)\nOutput: \(outputEnabled ? "enabled" : "off")\nApp wheel: always active · hold L3\nOwner: standalone Vibestick\n\nStop Herdr's gamepad plugin before enabling this listener."
         alert.runModal()
     }
 
@@ -1679,7 +1699,16 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func refreshDevices() {
-        state.setDevices(reader?.connectedDevices() ?? [])
+        let devices = reader?.connectedDevices() ?? []
+        let disconnected = !state.devices.isEmpty && devices.isEmpty
+        state.setDevices(devices)
+        if disconnected {
+            appWheel.close()
+            appWheelSessionActive = false
+            appWheelSuppressedButtons.removeAll()
+            releaseHeld()
+            state.announce("Controller disconnected")
+        }
     }
 
     private func handle(_ input: ControllerInput) {
@@ -1689,19 +1718,92 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             handleButton(button, pressed: pressed)
         case let .trigger(button, value):
             handleButton(button, pressed: value >= 0.5)
-        case .axis:
-            break
+        case let .axis(axis, _):
+            guard appWheel.isVisible, axis == .leftX || axis == .leftY else { return }
+            appWheel.updateSelection(
+                x: visual.axes[.leftX] ?? 0,
+                y: visual.axes[.leftY] ?? 0
+            )
         }
     }
 
     private func handleButton(_ button: PadButton, pressed: Bool) {
         guard pressed else {
             held.remove(button)
+            if appWheelSessionActive || appWheelSuppressedButtons.remove(button) != nil {
+                endAppWheelSessionIfIdle()
+                return
+            }
+            if button == .l3 {
+                finishAppWheelHold()
+            }
             return
         }
         guard !held.contains(button) else { return }
         held.insert(button)
 
+        if appWheelSessionActive {
+            appWheelSuppressedButtons.insert(button)
+            if button == .a {
+                appWheel.confirmSelection()
+            } else if button == .b {
+                appWheel.cancel()
+            }
+            return
+        }
+
+        if button == .l3 {
+            beginAppWheelHold()
+            return
+        }
+
+        performBinding(for: button)
+    }
+
+    private func beginAppWheelHold() {
+        appWheelHoldTimer?.invalidate()
+        appWheelHoldTriggered = false
+        appWheelHoldTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.appWheelHoldDuration,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.held.contains(.l3) else { return }
+                self.appWheelHoldTriggered = true
+                _ = self.beginAppWheelSession()
+            }
+        }
+    }
+
+    private func finishAppWheelHold() {
+        appWheelHoldTimer?.invalidate()
+        appWheelHoldTimer = nil
+        guard !appWheelHoldTriggered else {
+            appWheelHoldTriggered = false
+            return
+        }
+        performBinding(for: .l3)
+    }
+
+    @discardableResult
+    private func beginAppWheelSession() -> Bool {
+        guard appWheel.open() else { return false }
+        appWheelSessionActive = true
+        appWheelSuppressedButtons.formUnion(held)
+        appWheel.updateSelection(
+            x: visual.axes[.leftX] ?? 0,
+            y: visual.axes[.leftY] ?? 0
+        )
+        return true
+    }
+
+    private func endAppWheelSessionIfIdle() {
+        guard !appWheel.isVisible, held.isEmpty else { return }
+        appWheelSessionActive = false
+        appWheelSuppressedButtons.removeAll()
+    }
+
+    private func performBinding(for button: PadButton) {
         // The editor owns focus while open. Back remains a reliable close path
         // even if the user remapped its action.
         if overlay.isVisible {
@@ -1722,6 +1824,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func releaseHeld() {
+        appWheelHoldTimer?.invalidate()
+        appWheelHoldTimer = nil
+        appWheelHoldTriggered = false
         held.removeAll()
         visual.clear()
     }
@@ -1788,8 +1893,18 @@ private func runSelfCheck() {
         print("Self-check failed: app-aware profile persistence")
         exit(1)
     }
+
+    guard RadialSelection.index(x: 0, y: 0, itemCount: 4) == nil,
+          RadialSelection.index(x: 0, y: 1, itemCount: 4) == 0,
+          RadialSelection.index(x: 1, y: 0, itemCount: 4) == 1,
+          RadialSelection.index(x: 0, y: -1, itemCount: 4) == 2,
+          RadialSelection.index(x: -1, y: 0, itemCount: 4) == 3
+    else {
+        print("Self-check failed: app wheel controller direction mapping")
+        exit(1)
+    }
     try? FileManager.default.removeItem(at: tempURL.deletingLastPathComponent())
-    print("Self-check passed: Xbox GIP decoding and app-aware bindings persist.")
+    print("Self-check passed: Xbox GIP decoding, app-aware bindings, and radial selection.")
 }
 
 @main
