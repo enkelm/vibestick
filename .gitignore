@@ -1,0 +1,25 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Generated application bundle and release artifacts
+Vibestick.app/
+*.dSYM/
+
+# Xcode / Swift tooling
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Editors and local tooling
+.vscode/
+.idea/
+*.swp
+*.swo
