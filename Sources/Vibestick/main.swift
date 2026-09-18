@@ -203,6 +203,7 @@ final class OverlayController {
     }
 
     var isVisible: Bool { panel?.isVisible == true }
+    var isCapturing: Bool { uiState.captureButton != nil }
 
     func toggle() {
         if isVisible {
@@ -692,8 +693,6 @@ struct KeyCaptureSheet: View {
 
 @MainActor
 final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
-    private static let appWheelHoldDuration = 0.65
-
     let state = ProfileStore()
     let visual = ControllerVisualState()
     private var reader: ControllerReader!
@@ -706,10 +705,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     private var workspaceObserver: NSObjectProtocol?
     private var refreshTimer: Timer?
     private var appWheelHoldTimer: Timer?
-    private var appWheelHoldTriggered = false
     private var appWheelSessionActive = false
-    private var appWheelSuppressedButtons: Set<PadButton> = []
     private var held: Set<PadButton> = []
+    private var commandRouter = CommandRouter()
     private var diagnostics: [ControllerDiagnosticRecord] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -864,7 +862,6 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         if disconnected {
             appWheel.close()
             appWheelSessionActive = false
-            appWheelSuppressedButtons.removeAll()
             releaseHeld()
             state.announce("Controller disconnected")
         }
@@ -896,78 +893,56 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             handleButton(button, pressed: pressed)
         case let .trigger(button, value):
             handleButton(button, pressed: value >= 0.5)
-        case let .axis(axis, _):
-            guard appWheel.isVisible, axis == .leftX || axis == .leftY else { return }
-            appWheel.updateSelection(
-                x: visual.axes[.leftX] ?? 0,
-                y: visual.axes[.leftY] ?? 0
-            )
+        case .axis:
+            route(input)
         }
     }
 
     private func handleButton(_ button: PadButton, pressed: Bool) {
-        guard pressed else {
-            held.remove(button)
-            if appWheelSessionActive || appWheelSuppressedButtons.remove(button) != nil {
-                endAppWheelSessionIfIdle()
-                return
-            }
+        if pressed {
+            guard held.insert(button).inserted else { return }
+        } else {
+            guard held.remove(button) != nil else { return }
             if button == .l3 {
-                finishAppWheelHold()
+                appWheelHoldTimer?.invalidate()
+                appWheelHoldTimer = nil
             }
-            return
-        }
-        guard !held.contains(button) else { return }
-        held.insert(button)
-
-        if appWheelSessionActive {
-            appWheelSuppressedButtons.insert(button)
-            if button == .a {
-                appWheel.confirmSelection()
-            } else if button == .b {
-                appWheel.cancel()
-            }
-            return
         }
 
-        if button == .l3 {
+        let input = ControllerInput.button(button, pressed: pressed)
+        let routed = route(input)
+        if pressed,
+           button == .l3,
+           case .systemGesture(_, binding: nil, action: nil) = routed {
             beginAppWheelHold()
-            return
         }
-
-        performBinding(for: button)
+        if !pressed {
+            endAppWheelSessionIfIdle()
+        }
     }
 
     private func beginAppWheelHold() {
         appWheelHoldTimer?.invalidate()
-        appWheelHoldTriggered = false
         appWheelHoldTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.appWheelHoldDuration,
+            withTimeInterval: CommandRouter.longL3Duration,
             repeats: false
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.held.contains(.l3) else { return }
-                self.appWheelHoldTriggered = true
-                _ = self.beginAppWheelSession()
+                self.appWheelHoldTimer = nil
+                guard let route = self.commandRouter.resolveLongL3(
+                    context: self.routingContext,
+                    profile: self.state
+                ) else { return }
+                self.handle(route)
             }
         }
-    }
-
-    private func finishAppWheelHold() {
-        appWheelHoldTimer?.invalidate()
-        appWheelHoldTimer = nil
-        guard !appWheelHoldTriggered else {
-            appWheelHoldTriggered = false
-            return
-        }
-        performBinding(for: .l3)
     }
 
     @discardableResult
     private func beginAppWheelSession() -> Bool {
         guard appWheel.open() else { return false }
         appWheelSessionActive = true
-        appWheelSuppressedButtons.formUnion(held)
         appWheel.updateSelection(
             x: visual.axes[.leftX] ?? 0,
             y: visual.axes[.leftY] ?? 0
@@ -978,37 +953,96 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     private func endAppWheelSessionIfIdle() {
         guard !appWheel.isVisible, held.isEmpty else { return }
         appWheelSessionActive = false
-        appWheelSuppressedButtons.removeAll()
     }
 
-    private func performBinding(for button: PadButton) {
-        // The editor owns focus while open. Back remains a reliable close path
-        // even if the user remapped its action.
-        if overlay.isVisible {
-            if button == .back { overlay.close() }
-            return
+    @discardableResult
+    private func route(_ input: ControllerInput) -> InputRoute {
+        let context = routingContext
+        if !context.captureActive,
+           !context.appWheelActive,
+           !isSystemGestureInput(input) {
+            // Reclassify at the point of output so switching between Herdr and
+            // an ordinary Ghostty window cannot use the periodic refresh's
+            // stale context.
+            state.refreshFocus()
         }
+        let route = commandRouter.route(
+            input,
+            context: context,
+            profile: state,
+            app: state.focusedApp
+        )
+        handle(route)
+        return route
+    }
 
-        // Reclassify at the point of output so switching between Herdr and an
-        // ordinary Ghostty window cannot use the periodic refresh's stale
-        // context.
-        state.refreshFocus()
-        let action = state.action(for: button, app: state.focusedApp)
-        if action == .overlay {
-            overlay.open()
+    private var routingContext: InputRoutingContext {
+        InputRoutingContext(
+            captureActive: overlay.isCapturing,
+            appWheelActive: appWheelSessionActive || appWheel.isVisible,
+            herdrLayerActive: false
+        )
+    }
+
+    private func isSystemGestureInput(_ input: ControllerInput) -> Bool {
+        guard case let .button(button, _) = input else { return false }
+        return button == .l3 || button == .share
+    }
+
+    private func handle(_ route: InputRoute) {
+        switch route {
+        case .capture, .herdrLayer:
+            return
+        case let .appWheel(input):
+            handleAppWheelInput(input)
+        case let .systemGesture(input, _, action),
+             let .appBinding(input, action):
+            guard let action else { return }
+            perform(action, from: input)
+        }
+    }
+
+    private func handleAppWheelInput(_ input: ControllerInput) {
+        switch input {
+        case let .button(button, pressed: true):
+            if button == .a {
+                appWheel.confirmSelection()
+            } else if button == .b {
+                appWheel.cancel()
+            }
+        case let .axis(axis, _):
+            guard axis == .leftX || axis == .leftY else { return }
+            appWheel.updateSelection(
+                x: visual.axes[.leftX] ?? 0,
+                y: visual.axes[.leftY] ?? 0
+            )
+        case .button, .trigger:
             return
         }
-        guard outputEnabled else {
-            state.announce("Output is off · enable it from the menu")
+    }
+
+    private func perform(_ action: BindingAction, from input: ControllerInput) {
+        guard case let .button(button, _) = input else { return }
+        switch action {
+        case .none:
             return
+        case .overlay:
+            overlay.toggle()
+        case .switchApp:
+            _ = beginAppWheelSession()
+        case .key, .sequence:
+            guard outputEnabled else {
+                state.announce("Output is off · enable it from the menu")
+                return
+            }
+            actions.perform(action, from: button, target: state.focusedApp)
         }
-        actions.perform(action, from: button, target: state.focusedApp)
     }
 
     private func releaseHeld() {
         appWheelHoldTimer?.invalidate()
         appWheelHoldTimer = nil
-        appWheelHoldTriggered = false
+        commandRouter.resetTransientState()
         held.removeAll()
         visual.clear()
     }
