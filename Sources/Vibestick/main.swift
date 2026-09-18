@@ -703,6 +703,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     private var appWheelSessionActive = false
     private var appWheelSuppressedButtons: Set<PadButton> = []
     private var held: Set<PadButton> = []
+    private var diagnostics: [ControllerDiagnosticRecord] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("Vibestick started")
@@ -722,9 +723,14 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             Task { @MainActor in self?.state.refreshFocus() }
         }
 
-        reader = ControllerReader { [weak self] input in
-            Task { @MainActor in self?.handle(input) }
-        }
+        reader = ControllerReader(
+            onEvent: { [weak self] event in
+                Task { @MainActor in self?.handle(event) }
+            },
+            onDiagnostic: { [weak self] record in
+                Task { @MainActor in self?.recordDiagnostic(record) }
+            }
+        )
         if reader.start() {
             refreshDevices()
             state.announce(state.devices.isEmpty ? "Observe-only · no controller connected" : "Observe-only · output is off")
@@ -806,11 +812,28 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
 
     @objc private func showStatus() {
         let devices = reader?.connectedDevices() ?? []
-        let deviceText = devices.isEmpty ? "No real Xbox HID gamepad found." : devices.map(\.displayName).joined(separator: "\n")
+        let deviceText = devices.isEmpty
+            ? "Target controller \(TargetController.identifier) not found."
+            : devices.map(\.displayName).joined(separator: "\n")
         let permission = state.accessibilityGranted ? "Keyboard output: allowed" : "Keyboard output: Accessibility required"
+        let trace = diagnostics.suffix(16).map(\.description).joined(separator: "\n")
         let alert = NSAlert()
         alert.messageText = "Vibestick status"
-        alert.informativeText = "\(deviceText)\n\n\(permission)\nOutput: \(outputEnabled ? "enabled" : "off")\nApp wheel: always active · hold L3\nOwner: standalone Vibestick\n\nStop Herdr's gamepad plugin before enabling this listener."
+        alert.informativeText = """
+        \(deviceText)
+
+        \(reader.diagnosticSummary)
+
+        \(permission)
+        Output: \(outputEnabled ? "enabled" : "off")
+        App wheel: always active · hold L3
+        Owner: standalone Vibestick
+
+        Recent controller events:
+        \(trace.isEmpty ? "No events recorded." : trace)
+
+        Stop Herdr's gamepad plugin before enabling this listener.
+        """
         alert.runModal()
     }
 
@@ -833,6 +856,25 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             appWheelSuppressedButtons.removeAll()
             releaseHeld()
             state.announce("Controller disconnected")
+        }
+    }
+
+    private func recordDiagnostic(_ record: ControllerDiagnosticRecord) {
+        diagnostics.append(record)
+        if diagnostics.count > 100 {
+            diagnostics.removeFirst(diagnostics.count - 100)
+        }
+    }
+
+    private func handle(_ event: ControllerEvent) {
+        switch event {
+        case .connected:
+            state.setDevices(reader.connectedDevices())
+            state.announce("Target controller connected")
+        case .disconnected:
+            break
+        case let .input(input):
+            handle(input)
         }
     }
 
@@ -962,12 +1004,46 @@ struct VibestickMain {
     @MainActor
     static func main() {
         let arguments = CommandLine.arguments.dropFirst()
+        if arguments.contains("--controller-diagnostic") {
+            var coverage = ControllerDiagnosticCoverage()
+            let reader = ControllerReader(
+                onEvent: { event in
+                    print("[normalized] \(event.description)")
+                },
+                onDiagnostic: { record in
+                    print(record.description)
+                    if coverage.record(record) {
+                        print("[coverage] \(coverage.progressDescription(for: record.backend))")
+                    }
+                }
+            )
+            guard reader.start() else {
+                print("Could not open target-controller input monitor.")
+                exit(1)
+            }
+            print(reader.diagnosticSummary)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                print("\nDiscovery update:\n\(reader.diagnosticSummary)")
+            }
+            print("[coverage] \(coverage.progressDescription(for: .gameController))")
+            print(
+                "Exercise every control on \(TargetController.identifier), including Share; " +
+                "verify Game Controller reports each control and normalized output appears once. " +
+                "Press Control-C to stop."
+            )
+            RunLoop.main.run()
+            return
+        }
         if arguments.contains("--status") {
-            let reader = ControllerReader { _ in }
+            let reader = ControllerReader(onEvent: { _ in })
             _ = reader.start()
             let devices = reader.connectedDevices()
             reader.stop()
-            print(devices.isEmpty ? "No real Xbox HID gamepad found." : devices.map(\.displayName).joined(separator: "\n"))
+            print(
+                devices.isEmpty
+                    ? "Target controller \(TargetController.identifier) not found."
+                    : devices.map(\.displayName).joined(separator: "\n")
+            )
             return
         }
         if arguments.contains("--self-check") {

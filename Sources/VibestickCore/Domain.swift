@@ -3,6 +3,7 @@ import ApplicationServices
 import Combine
 import CoreGraphics
 import Foundation
+import IOKit.hid
 
 
 // MARK: - Normalized controller model
@@ -25,6 +26,7 @@ public enum PadButton: String, CaseIterable, Codable, Identifiable, Hashable {
     case dpadLeft = "dpad_left"
     case dpadRight = "dpad_right"
     case guide
+    case share
 
     public var id: String { rawValue }
 
@@ -51,14 +53,14 @@ public enum PadButton: String, CaseIterable, Codable, Identifiable, Hashable {
     }
 }
 
-public enum StickAxis: String {
+public enum StickAxis: String, CaseIterable, Equatable, Hashable {
     case leftX
     case leftY
     case rightX
     case rightY
 }
 
-public enum ControllerInput {
+public enum ControllerInput: Equatable {
     case button(PadButton, pressed: Bool)
     case trigger(PadButton, value: Double)
     case axis(StickAxis, value: Double)
@@ -69,6 +71,13 @@ public struct ConnectedDevice: Identifiable, Equatable {
     public let name: String
     public let vendorID: Int
     public let productID: Int
+
+    public init(id: String, name: String, vendorID: Int, productID: Int) {
+        self.id = id
+        self.name = name
+        self.vendorID = vendorID
+        self.productID = productID
+    }
 
     public var displayName: String {
         String(format: "%@ · %04X:%04X", name, vendorID, productID)
@@ -137,18 +146,17 @@ public enum XboxSeriesDecoder {
     }
 }
 
-// MARK: - HID input source
+// MARK: - Raw HID input source
 
-public final class ControllerReader {
+final class RawHIDControllerReader {
     private let manager: IOHIDManager
-    private let onInput: (ControllerInput) -> Void
+    private let onEvent: (ControllerEvent) -> Void
     private var started = false
+    private var devices: [ObjectIdentifier: ConnectedDevice] = [:]
     private var lastXboxButtons: [ObjectIdentifier: UInt16] = [:]
-    private var lastXboxTriggerPressed: [ObjectIdentifier: (Bool, Bool)] = [:]
-    private var lastAxis: [String: Double] = [:]
 
-    public init(onInput: @escaping (ControllerInput) -> Void) {
-        self.onInput = onInput
+    init(onEvent: @escaping (ControllerEvent) -> Void) {
+        self.onEvent = onEvent
         manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
 
         // Xbox One/Series devices expose the GIP report as vendor-defined HID.
@@ -156,13 +164,15 @@ public final class ControllerReader {
         // device prevents a second logical copy of every physical input.
         let matches: [[String: Any]] = [
             [
-                kIOHIDVendorIDKey as String: 0x045E,
+                kIOHIDVendorIDKey as String: TargetController.vendorID,
+                kIOHIDProductIDKey as String: TargetController.productID,
                 kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
                 kIOHIDDeviceUsageKey as String: kHIDUsage_GD_GamePad,
                 "GCSyntheticDevice": kCFBooleanFalse as Any,
             ],
             [
-                kIOHIDVendorIDKey as String: 0x045E,
+                kIOHIDVendorIDKey as String: TargetController.vendorID,
+                kIOHIDProductIDKey as String: TargetController.productID,
                 kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
                 kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Joystick,
                 "GCSyntheticDevice": kCFBooleanFalse as Any,
@@ -171,41 +181,87 @@ public final class ControllerReader {
         IOHIDManagerSetDeviceMatchingMultiple(manager, matches as CFArray)
     }
 
-    public func start() -> Bool {
+    func start() -> Bool {
         guard !started else { return true }
         let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, device in
+            guard let context else { return }
+            Unmanaged<RawHIDControllerReader>
+                .fromOpaque(context)
+                .takeUnretainedValue()
+                .handleConnected(device)
+        }, context)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, device in
+            guard let context else { return }
+            Unmanaged<RawHIDControllerReader>
+                .fromOpaque(context)
+                .takeUnretainedValue()
+                .handleDisconnected(device)
+        }, context)
         IOHIDManagerRegisterInputValueCallback(manager, { context, _, _, value in
             guard let context else { return }
-            Unmanaged<ControllerReader>.fromOpaque(context).takeUnretainedValue().handle(value)
+            Unmanaged<RawHIDControllerReader>.fromOpaque(context).takeUnretainedValue().handle(value)
         }, context)
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         started = IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
         return started
     }
 
-    public func stop() {
+    func stop() {
         guard started else { return }
         IOHIDManagerUnscheduleFromRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         started = false
+        devices.removeAll()
         lastXboxButtons.removeAll()
-        lastXboxTriggerPressed.removeAll()
-        lastAxis.removeAll()
     }
 
-    public func connectedDevices() -> [ConnectedDevice] {
-        guard let devices = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice> else { return [] }
-        return devices.map { device in
-            let name = IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String ?? "Xbox controller"
-            let vendor = (IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? NSNumber)?.intValue ?? 0
-            let product = (IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? NSNumber)?.intValue ?? 0
-            return ConnectedDevice(
-                id: String(format: "%04X:%04X:%@", vendor, product, name),
-                name: name,
-                vendorID: vendor,
-                productID: product
-            )
-        }.sorted { $0.displayName < $1.displayName }
+    func connectedDevices() -> [ConnectedDevice] {
+        Dictionary(grouping: devices.values, by: \.id)
+            .compactMap { $0.value.first }
+            .sorted { $0.displayName < $1.displayName }
+    }
+
+    private func handleConnected(_ device: IOHIDDevice) {
+        let key = ObjectIdentifier(device)
+        guard devices[key] == nil else { return }
+        let connectedDevice = describe(device)
+        let alreadyConnected = devices.values.contains { $0.id == connectedDevice.id }
+        devices[key] = connectedDevice
+        if !alreadyConnected {
+            onEvent(.connected(connectedDevice))
+        }
+    }
+
+    private func handleDisconnected(_ device: IOHIDDevice) {
+        let key = ObjectIdentifier(device)
+        guard let connectedDevice = devices.removeValue(forKey: key) else { return }
+        lastXboxButtons.removeValue(forKey: key)
+        if !devices.values.contains(where: { $0.id == connectedDevice.id }) {
+            onEvent(.disconnected(connectedDevice))
+        }
+    }
+
+    private func describe(_ device: IOHIDDevice) -> ConnectedDevice {
+        let name = IOHIDDeviceGetProperty(
+            device,
+            kIOHIDProductKey as CFString
+        ) as? String ?? "Xbox Wireless Controller"
+        let vendor = (
+            IOHIDDeviceGetProperty(device, kIOHIDVendorIDKey as CFString) as? NSNumber
+        )?.intValue ?? 0
+        let product = (
+            IOHIDDeviceGetProperty(device, kIOHIDProductIDKey as CFString) as? NSNumber
+        )?.intValue ?? 0
+        let location = (
+            IOHIDDeviceGetProperty(device, kIOHIDLocationIDKey as CFString) as? NSNumber
+        )?.uint32Value ?? 0
+        return ConnectedDevice(
+            id: String(format: "%04X:%04X:%08X", vendor, product, location),
+            name: name,
+            vendorID: vendor,
+            productID: product
+        )
     }
 
     private func handle(_ value: IOHIDValue) {
@@ -228,7 +284,7 @@ public final class ControllerReader {
 
         if page == UInt32(kHIDPage_Button) {
             guard let button = genericButton(for: usage) else { return }
-            onInput(.button(button, pressed: raw != 0))
+            onEvent(.input(.button(button, pressed: raw != 0)))
             return
         }
 
@@ -237,22 +293,21 @@ public final class ControllerReader {
         let lower = IOHIDElementGetLogicalMin(element)
         let upper = IOHIDElementGetLogicalMax(element)
         guard upper > lower else { return }
-        let valueKey = "\(deviceID)-\(usage)"
         let normalized = Double(raw - lower) / Double(upper - lower)
 
         switch usage {
         case 0x32:
-            emitTrigger(.lt, value: normalized, key: valueKey)
+            emitTrigger(.lt, value: normalized)
         case 0x35:
-            emitTrigger(.rt, value: normalized, key: valueKey)
+            emitTrigger(.rt, value: normalized)
         case 0x30:
-            emitAxis(.leftX, value: normalized * 2.0 - 1.0, key: valueKey)
+            emitAxis(.leftX, value: normalized * 2.0 - 1.0)
         case 0x31:
-            emitAxis(.leftY, value: normalized * 2.0 - 1.0, key: valueKey)
+            emitAxis(.leftY, value: normalized * 2.0 - 1.0)
         case 0x33:
-            emitAxis(.rightX, value: normalized * 2.0 - 1.0, key: valueKey)
+            emitAxis(.rightX, value: normalized * 2.0 - 1.0)
         case 0x34:
-            emitAxis(.rightY, value: normalized * 2.0 - 1.0, key: valueKey)
+            emitAxis(.rightY, value: normalized * 2.0 - 1.0)
         default:
             break
         }
@@ -265,31 +320,15 @@ public final class ControllerReader {
         lastXboxButtons[deviceID] = buttons
 
         for (button, pressed) in report.buttons {
-            onInput(.button(button, pressed: pressed))
+            onEvent(.input(.button(button, pressed: pressed)))
         }
 
-        let previousTriggers = lastXboxTriggerPressed[deviceID] ?? (false, false)
-        var triggerState = previousTriggers
         for (button, value) in report.triggers {
-            let pressed = value >= 0.5
-            if button == .lt {
-                triggerState.0 = pressed
-                if pressed != previousTriggers.0 {
-                    onInput(.trigger(button, value: value))
-                }
-            } else {
-                triggerState.1 = pressed
-                if pressed != previousTriggers.1 {
-                    onInput(.trigger(button, value: value))
-                }
-            }
+            emitTrigger(button, value: value)
         }
-        lastXboxTriggerPressed[deviceID] = triggerState
 
         for (axis, value) in report.axes {
-            let key = "\(deviceID)-axis-\(axis.rawValue)"
-            guard changedEnough(key, value: value, threshold: 0.01) else { continue }
-            onInput(.axis(axis, value: value))
+            emitAxis(axis, value: value)
         }
     }
 
@@ -314,21 +353,13 @@ public final class ControllerReader {
         }
     }
 
-    private func emitTrigger(_ button: PadButton, value: Double, key: String) {
-        guard changedEnough(key, value: value, threshold: 0.02) else { return }
-        onInput(.trigger(button, value: max(0.0, min(1.0, value))))
+    private func emitTrigger(_ button: PadButton, value: Double) {
+        onEvent(.input(.trigger(button, value: max(0.0, min(1.0, value)))))
     }
 
-    private func emitAxis(_ axis: StickAxis, value: Double, key: String) {
+    private func emitAxis(_ axis: StickAxis, value: Double) {
         let clamped = max(-1.0, min(1.0, value))
-        guard changedEnough(key, value: clamped, threshold: 0.01) else { return }
-        onInput(.axis(axis, value: clamped))
-    }
-
-    private func changedEnough(_ key: String, value: Double, threshold: Double) -> Bool {
-        if let previous = lastAxis[key], abs(previous - value) < threshold { return false }
-        lastAxis[key] = value
-        return true
+        onEvent(.input(.axis(axis, value: clamped)))
     }
 }
 
