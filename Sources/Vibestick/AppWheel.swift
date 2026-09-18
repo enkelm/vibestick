@@ -44,11 +44,13 @@ final class AppWheelController {
     private static let panelSize = NSSize(width: 560, height: 560)
 
     private let state: ProfileStore
+    private let appActivated: () -> Void
     private let model = AppWheelModel()
     private var panel: AppWheelPanel?
 
-    init(state: ProfileStore) {
+    init(state: ProfileStore, appActivated: @escaping () -> Void) {
         self.state = state
+        self.appActivated = appActivated
     }
 
     var isVisible: Bool { panel?.isVisible == true }
@@ -85,9 +87,7 @@ final class AppWheelController {
         close()
         if item.application.activate(options: [.activateAllWindows]) {
             state.announce("Opened \(item.name)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.state.refreshFocus()
-            }
+            appActivated()
         } else {
             state.announce("macOS could not open \(item.name)")
         }

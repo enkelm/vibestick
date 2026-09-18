@@ -12,9 +12,11 @@ import VibestickCore
 @MainActor
 final class MacActions: OutputAction {
     private let state: ProfileStore
+    private let appActivated: () -> Void
 
-    init(state: ProfileStore) {
+    init(state: ProfileStore, appActivated: @escaping () -> Void) {
         self.state = state
+        self.appActivated = appActivated
     }
 
     func send(_ action: BindingAction, from button: PadButton, to app: FocusedApp) {
@@ -86,9 +88,7 @@ final class MacActions: OutputAction {
         let next = candidates[(currentIndex + 1) % candidates.count]
         if next.activate(options: [.activateAllWindows]) {
             state.announce("Switched to \(next.localizedName ?? "app")")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                self.state.refreshFocus()
-            }
+            appActivated()
         } else {
             state.announce("macOS refused activation for \(next.localizedName ?? "app")")
         }
@@ -690,8 +690,19 @@ struct KeyCaptureSheet: View {
 
 // MARK: - Application coordinator
 
+private enum AccessibilityOnboarding {
+    private static let requestRecordedKey =
+        "Vibestick.hasRequestedAccessibility"
+
+    static func requestIfNeeded(defaults: UserDefaults = .standard) {
+        guard !defaults.bool(forKey: requestRecordedKey) else { return }
+        defaults.set(true, forKey: requestRecordedKey)
+        CGRequestPostEventAccess()
+    }
+}
+
 @MainActor
-final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
+final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let state = ProfileStore()
     let visual = ControllerVisualState()
     private var reader: ControllerReader!
@@ -700,31 +711,42 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     private var appWheel: AppWheelController!
     private var statusItem: NSStatusItem!
     private var outputMenuItem: NSMenuItem?
-    private var outputEnabled = false
+    private var targetControllerStatusMenuItem: NSMenuItem?
+    private var accessibilityStatusMenuItem: NSMenuItem?
+    private var outputStatusMenuItem: NSMenuItem?
+    private var appContextStatusMenuItem: NSMenuItem?
     private var workspaceObserver: NSObjectProtocol?
     private var refreshTimer: Timer?
     private var appWheelHoldTimer: Timer?
     private var appWheelSessionActive = false
-    private var held: Set<PadButton> = []
     private var commandRouter = CommandRouter()
+    private var outputLifecycle = OutputLifecycle()
     private var diagnostics: [ControllerDiagnosticRecord] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("Vibestick started")
-        actions = MacActions(state: state)
+        actions = MacActions(
+            state: state,
+            appActivated: { [weak self] in self?.scheduleFocusRefresh() }
+        )
         overlay = OverlayController(state: state, visual: visual)
-        appWheel = AppWheelController(state: state)
+        appWheel = AppWheelController(
+            state: state,
+            appActivated: { [weak self] in self?.scheduleFocusRefresh() }
+        )
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "⌘ Pad"
         statusItem.menu = makeMenu()
 
-        state.refreshFocus()
+        AccessibilityOnboarding.requestIfNeeded()
+        refreshAccessibility()
+        refreshFocus()
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.state.refreshFocus() }
+            Task { @MainActor in self?.refreshFocus() }
         }
 
         reader = ControllerReader(
@@ -737,16 +759,18 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         )
         if reader.start() {
             refreshDevices()
-            state.announce(state.devices.isEmpty ? "Observe-only · no controller connected" : "Observe-only · output is off")
+            state.announce(activeOutputStatusMessage)
         } else {
             state.announce("Could not open Xbox HID monitor")
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshDevices()
-                self?.state.refreshFocus()
+                self?.refreshAccessibility()
+                self?.refreshFocus()
             }
         }
+        refreshMenuStatus()
         let controllerDescription = state.devices.isEmpty
             ? "none detected"
             : state.devices.map(\.displayName).joined(separator: ", ")
@@ -759,9 +783,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        releaseHeld()
-        appWheelHoldTimer?.invalidate()
-        appWheel?.close()
+        applyLifecycle(.shutdown, clearVisualization: true)
         refreshTimer?.invalidate()
         if let workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
@@ -771,19 +793,38 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
 
     private func makeMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
         menu.addItem(withTitle: "Open bindings overlay", action: #selector(openOverlay), keyEquivalent: "")
         menu.addItem(withTitle: "Toggle app wheel", action: #selector(toggleAppWheel), keyEquivalent: "")
-        let outputItem = menu.addItem(withTitle: "Enable output", action: #selector(toggleOutput), keyEquivalent: "")
+        let outputItem = menu.addItem(withTitle: "Pause output", action: #selector(toggleOutput), keyEquivalent: "")
         outputItem.state = .off
         outputMenuItem = outputItem
         menu.addItem(withTitle: "Request Accessibility", action: #selector(requestAccessibility), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Controller status", action: #selector(showStatus), keyEquivalent: "")
+        targetControllerStatusMenuItem = addStatusItem("Target controller: checking", to: menu)
+        accessibilityStatusMenuItem = addStatusItem("Accessibility: checking", to: menu)
+        outputStatusMenuItem = addStatusItem("Output: active", to: menu)
+        appContextStatusMenuItem = addStatusItem("App context: checking", to: menu)
+        menu.addItem(withTitle: "Show diagnostics", action: #selector(showStatus), keyEquivalent: "")
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Reset focused app profile", action: #selector(resetFocusedProfile), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Vibestick", action: #selector(quit), keyEquivalent: "q")
         for item in menu.items { item.target = self }
         return menu
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        refreshAccessibility()
+        refreshFocus()
+        refreshMenuStatus()
+    }
+
+    private func addStatusItem(_ title: String, to menu: NSMenu) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        menu.addItem(item)
+        return item
     }
 
     @objc private func openOverlay() {
@@ -800,20 +841,18 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleOutput() {
-        outputEnabled.toggle()
-        outputMenuItem?.state = outputEnabled ? .on : .off
-        outputMenuItem?.title = outputEnabled ? "Disable output" : "Enable output"
-        if outputEnabled {
-            state.announce(state.accessibilityGranted ? "Output enabled · mappings are live" : "Output enabled · keyboard actions need Accessibility")
+        let pausing = !outputLifecycle.isPaused
+        applyLifecycle(.setPaused(pausing))
+        if pausing {
+            state.announce("Emergency pause active · system controls remain available")
         } else {
-            releaseHeld()
-            state.announce("Output disabled · observe-only")
+            state.announce(activeOutputStatusMessage)
         }
     }
 
     @objc private func requestAccessibility() {
         CGRequestPostEventAccess()
-        state.setAccessibility()
+        refreshAccessibility()
         state.announce(state.accessibilityGranted ? "Accessibility enabled" : "Accessibility still required")
     }
 
@@ -833,7 +872,8 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         \(reader.diagnosticSummary)
 
         \(permission)
-        Output: \(outputEnabled ? "enabled" : "off")
+        Output: \(outputLifecycle.isPaused ? "emergency pause" : "active")
+        App context: \(state.describe(state.focusedApp))
         App wheel: always active · hold L3
         Owner: standalone Vibestick\(configuration)
 
@@ -856,13 +896,21 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
 
     private func refreshDevices() {
         let devices = reader?.connectedDevices() ?? []
-        let disconnected = !state.devices.isEmpty && devices.isEmpty
+        let wasConnected = outputLifecycle.targetControllerConnected
+        let isConnected = !devices.isEmpty
         state.setDevices(devices)
-        if disconnected {
-            appWheel.close()
-            appWheelSessionActive = false
-            releaseHeld()
+        applyLifecycle(
+            .setTargetControllerConnected(isConnected),
+            clearVisualization: wasConnected && !isConnected
+        )
+        if wasConnected && !isConnected {
             state.announce("Controller disconnected")
+        } else if !wasConnected && isConnected {
+            state.announce(
+                outputLifecycle.isPaused
+                    ? "Target controller connected · emergency pause remains active"
+                    : "Target controller connected · output active"
+            )
         }
     }
 
@@ -875,17 +923,17 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
 
     private func handle(_ event: ControllerEvent) {
         switch event {
-        case .connected:
-            state.setDevices(reader.connectedDevices())
-            state.announce("Target controller connected")
-        case .disconnected:
-            break
+        case .connected, .disconnected:
+            refreshDevices()
         case let .input(input):
             handle(input)
         }
     }
 
     private func handle(_ input: ControllerInput) {
+        // Reclassify before tracking every fresh input so a context change
+        // cleans up the old context before even a system gesture is accepted.
+        refreshFocus()
         visual.apply(input)
         switch input {
         case let .button(button, pressed):
@@ -898,10 +946,8 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func handleButton(_ button: PadButton, pressed: Bool) {
-        if pressed {
-            guard held.insert(button).inserted else { return }
-        } else {
-            guard held.remove(button) != nil else { return }
+        guard outputLifecycle.setHeld(button, pressed: pressed) else { return }
+        if !pressed {
             if button == .l3 {
                 appWheelHoldTimer?.invalidate()
                 appWheelHoldTimer = nil
@@ -926,11 +972,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         value: Double
     ) {
         let pressed = value >= 0.5
-        if pressed {
-            held.insert(button)
-        } else {
-            held.remove(button)
-        }
+        outputLifecycle.setHeld(button, pressed: pressed)
         route(input)
         if !pressed {
             endAppWheelSessionIfIdle()
@@ -944,7 +986,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             repeats: false
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.held.contains(.l3) else { return }
+                guard let self, self.outputLifecycle.isHeld(.l3) else { return }
                 self.appWheelHoldTimer = nil
                 guard let route = self.commandRouter.resolveLongL3(
                     context: self.routingContext,
@@ -967,21 +1009,13 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func endAppWheelSessionIfIdle() {
-        guard !appWheel.isVisible, held.isEmpty else { return }
+        guard !appWheel.isVisible, !outputLifecycle.hasHeldControls else { return }
         appWheelSessionActive = false
     }
 
     @discardableResult
     private func route(_ input: ControllerInput) -> InputRoute {
         let context = routingContext
-        if !context.captureActive,
-           !context.appWheelActive,
-           !CommandRouter.ownsSystemGesture(input) {
-            // Reclassify at the point of output so switching between Herdr and
-            // an ordinary Ghostty window cannot use the periodic refresh's
-            // stale context.
-            state.refreshFocus()
-        }
         let route = commandRouter.route(
             input,
             context: context,
@@ -1001,6 +1035,8 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func handle(_ route: InputRoute) {
+        guard outputLifecycle.allows(route) else { return }
+
         switch route {
         case .capture, .herdrLayer:
             return
@@ -1048,20 +1084,77 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         case .switchApp:
             _ = beginAppWheelSession()
         case .key, .sequence:
-            guard outputEnabled else {
-                state.announce("Output is off · enable it from the menu")
-                return
-            }
             actions.perform(action, from: button, target: state.focusedApp)
         }
     }
 
-    private func releaseHeld() {
-        appWheelHoldTimer?.invalidate()
-        appWheelHoldTimer = nil
-        commandRouter.resetTransientState()
-        held.removeAll()
-        visual.clear()
+    private func refreshFocus() {
+        state.refreshFocus()
+        applyLifecycle(.appContextChanged(state.focusedApp))
+    }
+
+    private func scheduleFocusRefresh() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.refreshFocus()
+        }
+    }
+
+    private func refreshAccessibility() {
+        state.setAccessibility()
+        applyLifecycle(
+            .setAccessibilityGranted(state.accessibilityGranted)
+        )
+    }
+
+    private func applyLifecycle(
+        _ event: OutputLifecycleEvent,
+        clearVisualization: Bool = false
+    ) {
+        applyCleanup(outputLifecycle.handle(event))
+        if clearVisualization {
+            visual.clear()
+        }
+        refreshMenuStatus()
+    }
+
+    private func applyCleanup(_ cleanup: OutputCleanup) {
+        if cleanup.contains(.cancelPendingRoutes) {
+            appWheelHoldTimer?.invalidate()
+            appWheelHoldTimer = nil
+            commandRouter.resetTransientState()
+        }
+        if cleanup.contains(.closeAppWheel) {
+            appWheel?.close()
+            appWheelSessionActive = false
+        }
+    }
+
+    private func refreshMenuStatus() {
+        let targetControllerDescription = state.devices.first?.name ?? "disconnected"
+        targetControllerStatusMenuItem?.title =
+            "Target controller: \(targetControllerDescription)"
+        accessibilityStatusMenuItem?.title = state.accessibilityGranted
+            ? "Accessibility: granted"
+            : "Accessibility: required"
+        outputStatusMenuItem?.title = outputLifecycle.isPaused
+            ? "Output: emergency pause"
+            : "Output: active"
+        appContextStatusMenuItem?.title = "App context: \(state.focusedApp.name)"
+        outputMenuItem?.title = outputLifecycle.isPaused
+            ? "Resume output"
+            : "Pause output"
+        outputMenuItem?.state = outputLifecycle.isPaused ? .on : .off
+        statusItem?.button?.title = outputLifecycle.isPaused ? "⌘ Pad ⏸" : "⌘ Pad"
+    }
+
+    private var activeOutputStatusMessage: String {
+        if !outputLifecycle.targetControllerConnected {
+            return "Output active · waiting for target controller"
+        }
+        if !state.accessibilityGranted {
+            return "Output active · keyboard actions need Accessibility"
+        }
+        return "Output active · mappings are live"
     }
 }
 

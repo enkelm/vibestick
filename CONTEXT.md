@@ -11,6 +11,10 @@ A software-development workflow in which a person directs and collaborates with 
 A controller input that complements keyboard, pointer, and voice input rather than replacing them.
 _Avoid_: Primary input, keyboard replacement
 
+**Emergency pause**:
+A session-only safety state that suspends mapped output while preserving system-level recovery surfaces and live controller visualization; a new launch starts active.
+_Avoid_: Output disabled, observe-only mode
+
 **Target controller**:
 The Xbox Wireless Controller with Share used to validate Vibestick's initial behavior; support for other controllers is outside the initial product boundary.
 _Avoid_: Generic gamepad, every Xbox controller
