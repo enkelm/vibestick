@@ -61,11 +61,23 @@ final class SystemGestureRoutingTests: XCTestCase {
         let released = ControllerInput.button(.l3, pressed: false)
 
         XCTAssertEqual(
-            router.route(pressed, context: .init(), profile: store, app: app),
+            router.route(
+                pressed,
+                at: 10,
+                context: .init(),
+                profile: store,
+                app: app
+            ),
             .systemGesture(pressed, binding: nil, action: nil)
         )
         XCTAssertEqual(
-            router.route(released, context: .init(), profile: store, app: app),
+            router.route(
+                released,
+                at: 10 + CommandRouter.longL3Duration - 0.001,
+                context: .init(),
+                profile: store,
+                app: app
+            ),
             .systemGesture(released, binding: .shortL3, action: shortcut)
         )
         XCTAssertEqual(
@@ -85,15 +97,44 @@ final class SystemGestureRoutingTests: XCTestCase {
         let pressed = ControllerInput.button(.l3, pressed: true)
         let released = ControllerInput.button(.l3, pressed: false)
 
-        _ = router.route(pressed, context: .init(), profile: store, app: app)
+        _ = router.route(
+            pressed,
+            at: 10,
+            context: .init(),
+            profile: store,
+            app: app
+        )
 
+        XCTAssertNil(
+            router.resolveLongL3(
+                at: 10 + CommandRouter.longL3Duration - 0.001,
+                context: .init(),
+                profile: store
+            )
+        )
         XCTAssertEqual(
-            router.resolveLongL3(context: .init(), profile: store),
+            router.resolveLongL3(
+                at: 10 + CommandRouter.longL3Duration,
+                context: .init(),
+                profile: store
+            ),
             .systemGesture(pressed, binding: .longL3, action: longAction)
         )
-        XCTAssertNil(router.resolveLongL3(context: .init(), profile: store))
+        XCTAssertNil(
+            router.resolveLongL3(
+                at: 10 + CommandRouter.longL3Duration + 1,
+                context: .init(),
+                profile: store
+            )
+        )
         XCTAssertEqual(
-            router.route(released, context: .init(), profile: store, app: app),
+            router.route(
+                released,
+                at: 11,
+                context: .init(),
+                profile: store,
+                app: app
+            ),
             .systemGesture(released, binding: nil, action: nil)
         )
     }
@@ -177,6 +218,43 @@ final class SystemGestureRoutingTests: XCTestCase {
         XCTAssertEqual(
             router.route(released, context: .init(), profile: store, app: app),
             .systemGesture(released, binding: nil, action: nil)
+        )
+    }
+
+    func testEveryTriggerSampleIsOwnedWhileActionFiresOnlyOnPressEdge() {
+        var router = CommandRouter()
+        let store = ProfileStore(loadFromDisk: false)
+        let app = FocusedApp(bundleID: "com.example.target", name: "Target")
+        let action = BindingAction.key(KeyChord(keyCode: 36))
+        store.beginEditing(app)
+        store.setBinding(action, for: .lt)
+
+        XCTAssertEqual(
+            router.route(
+                .trigger(.lt, value: 0.6),
+                context: .init(),
+                profile: store,
+                app: app
+            ),
+            .appBinding(.trigger(.lt, value: 0.6), action: action)
+        )
+        XCTAssertEqual(
+            router.route(
+                .trigger(.lt, value: 0.8),
+                context: .init(),
+                profile: store,
+                app: app
+            ),
+            .appBinding(.trigger(.lt, value: 0.8), action: nil)
+        )
+        XCTAssertEqual(
+            router.route(
+                .trigger(.lt, value: 0.4),
+                context: .init(),
+                profile: store,
+                app: app
+            ),
+            .appBinding(.trigger(.lt, value: 0.4), action: nil)
         )
     }
 }

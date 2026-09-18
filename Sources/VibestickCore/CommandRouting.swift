@@ -52,20 +52,23 @@ public struct CommandRouter {
 
     private enum L3State {
         case idle
-        case pending
+        case pending(since: TimeInterval)
         case longResolved
     }
 
     private var l3State = L3State.idle
+    private var activeTriggers: Set<PadButton> = []
 
     public init() {}
 
     public mutating func route(
         _ input: ControllerInput,
+        at timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime,
         context: InputRoutingContext,
         profile: ProfileStore,
         app: FocusedApp
     ) -> InputRoute {
+        let activatedButton = updateTriggerState(for: input)
         if context.captureActive {
             cancelL3IfReleased(input)
             return .capture(input)
@@ -84,19 +87,22 @@ public struct CommandRouter {
         case let .l3(pressed):
             if pressed {
                 if case .idle = l3State {
-                    l3State = .pending
+                    l3State = .pending(since: timestamp)
                 }
                 return .systemGesture(input, binding: nil, action: nil)
             }
 
             defer { l3State = .idle }
-            guard case .pending = l3State else {
+            guard case let .pending(since) = l3State else {
                 return .systemGesture(input, binding: nil, action: nil)
             }
+            let binding: SystemBinding = timestamp - since >= Self.longL3Duration
+                ? .longL3
+                : .shortL3
             return .systemGesture(
                 input,
-                binding: .shortL3,
-                action: profile.systemBinding(for: .shortL3)
+                binding: binding,
+                action: profile.systemBinding(for: binding)
             )
         case nil:
             break
@@ -106,15 +112,18 @@ public struct CommandRouter {
         }
         return .appBinding(
             input,
-            action: action(for: input, profile: profile, app: app)
+            action: activatedButton.map { profile.action(for: $0, app: app) }
         )
     }
 
     public mutating func resolveLongL3(
+        at timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime,
         context: InputRoutingContext,
         profile: ProfileStore
     ) -> InputRoute? {
-        guard case .pending = l3State else { return nil }
+        guard case let .pending(since) = l3State,
+              timestamp - since >= Self.longL3Duration
+        else { return nil }
         l3State = .longResolved
         guard !context.captureActive, !context.appWheelActive else { return nil }
 
@@ -131,6 +140,7 @@ public struct CommandRouter {
 
     public mutating func resetTransientState() {
         l3State = .idle
+        activeTriggers.removeAll()
     }
 
     public func action(
@@ -145,6 +155,26 @@ public struct CommandRouter {
     private mutating func cancelL3IfReleased(_ input: ControllerInput) {
         guard case .button(.l3, pressed: false) = input else { return }
         l3State = .idle
+    }
+
+    private mutating func updateTriggerState(
+        for input: ControllerInput
+    ) -> PadButton? {
+        switch input {
+        case let .button(button, pressed):
+            return pressed ? button : nil
+        case let .trigger(button, value):
+            let pressed = value >= 0.5
+            let wasPressed = activeTriggers.contains(button)
+            if pressed {
+                activeTriggers.insert(button)
+            } else {
+                activeTriggers.remove(button)
+            }
+            return pressed && !wasPressed ? button : nil
+        case .axis:
+            return nil
+        }
     }
 
     private static func systemGesture(

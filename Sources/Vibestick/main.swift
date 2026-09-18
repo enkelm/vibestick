@@ -218,12 +218,11 @@ final class OverlayController {
         if panel == nil { panel = makePanel() }
         guard let panel else { return }
         if panel.isVisible {
-            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
             return
         }
         panel.center()
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
     }
 
     func close() {
@@ -892,7 +891,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         case let .button(button, pressed):
             handleButton(button, pressed: pressed)
         case let .trigger(button, value):
-            handleButton(button, pressed: value >= 0.5)
+            handleTrigger(input, button: button, value: value)
         case .axis:
             route(input)
         }
@@ -916,6 +915,23 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
            case .systemGesture(_, binding: nil, action: nil) = routed {
             beginAppWheelHold()
         }
+        if !pressed {
+            endAppWheelSessionIfIdle()
+        }
+    }
+
+    private func handleTrigger(
+        _ input: ControllerInput,
+        button: PadButton,
+        value: Double
+    ) {
+        let pressed = value >= 0.5
+        if pressed {
+            held.insert(button)
+        } else {
+            held.remove(button)
+        }
+        route(input)
         if !pressed {
             endAppWheelSessionIfIdle()
         }
@@ -1017,7 +1033,13 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
     }
 
     private func perform(_ action: BindingAction, from input: ControllerInput) {
-        guard case let .button(button, _) = input else { return }
+        let button: PadButton
+        switch input {
+        case let .button(source, _), let .trigger(source, _):
+            button = source
+        case .axis:
+            return
+        }
         switch action {
         case .none:
             return
