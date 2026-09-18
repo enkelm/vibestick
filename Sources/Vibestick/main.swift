@@ -613,6 +613,13 @@ struct OverlayView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            if let configurationNotice = state.configurationNotice {
+                Text(configurationNotice)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(2)
+            }
             HStack(spacing: 8) {
                 Text("Hold L3 for app wheel · A opens · B closes")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
@@ -749,6 +756,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         print("Controller: \(controllerDescription)")
         print("Focused app: \(state.describe(state.focusedApp))")
         print("Status: \(state.status)")
+        if let configurationNotice = state.configurationNotice {
+            print("Configuration: \(configurationNotice)")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -816,6 +826,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             ? "Target controller \(TargetController.identifier) not found."
             : devices.map(\.displayName).joined(separator: "\n")
         let permission = state.accessibilityGranted ? "Keyboard output: allowed" : "Keyboard output: Accessibility required"
+        let configuration = state.configurationNotice.map { "\nConfiguration: \($0)" } ?? ""
         let trace = diagnostics.suffix(16).map(\.description).joined(separator: "\n")
         let alert = NSAlert()
         alert.messageText = "Vibestick status"
@@ -827,7 +838,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         \(permission)
         Output: \(outputEnabled ? "enabled" : "off")
         App wheel: always active · hold L3
-        Owner: standalone Vibestick
+        Owner: standalone Vibestick\(configuration)
 
         Recent controller events:
         \(trace.isEmpty ? "No events recorded." : trace)
