@@ -960,7 +960,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         let context = routingContext
         if !context.captureActive,
            !context.appWheelActive,
-           !isSystemGestureInput(input) {
+           !CommandRouter.ownsSystemGesture(input) {
             // Reclassify at the point of output so switching between Herdr and
             // an ordinary Ghostty window cannot use the periodic refresh's
             // stale context.
@@ -982,11 +982,6 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             appWheelActive: appWheelSessionActive || appWheel.isVisible,
             herdrLayerActive: false
         )
-    }
-
-    private func isSystemGestureInput(_ input: ControllerInput) -> Bool {
-        guard case let .button(button, _) = input else { return false }
-        return button == .l3 || button == .share
     }
 
     private func handle(_ route: InputRoute) {

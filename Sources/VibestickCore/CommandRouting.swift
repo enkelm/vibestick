@@ -45,6 +45,11 @@ public protocol OutputAction {
 public struct CommandRouter {
     public static let longL3Duration: TimeInterval = 0.65
 
+    private enum SystemGestureInput {
+        case l3(pressed: Bool)
+        case share(pressed: Bool)
+    }
+
     private enum L3State {
         case idle
         case pending
@@ -69,14 +74,14 @@ public struct CommandRouter {
             cancelL3IfReleased(input)
             return .appWheel(input)
         }
-        if case let .button(.share, pressed) = input {
+        switch Self.systemGesture(for: input) {
+        case let .share(pressed):
             return .systemGesture(
                 input,
                 binding: pressed ? .share : nil,
                 action: pressed ? profile.systemBinding(for: .share) : nil
             )
-        }
-        if case let .button(.l3, pressed) = input {
+        case let .l3(pressed):
             if pressed {
                 if case .idle = l3State {
                     l3State = .pending
@@ -93,6 +98,8 @@ public struct CommandRouter {
                 binding: .shortL3,
                 action: profile.systemBinding(for: .shortL3)
             )
+        case nil:
+            break
         }
         if context.herdrLayerActive {
             return .herdrLayer(input)
@@ -118,6 +125,10 @@ public struct CommandRouter {
         )
     }
 
+    public static func ownsSystemGesture(_ input: ControllerInput) -> Bool {
+        systemGesture(for: input) != nil
+    }
+
     public mutating func resetTransientState() {
         l3State = .idle
     }
@@ -134,6 +145,20 @@ public struct CommandRouter {
     private mutating func cancelL3IfReleased(_ input: ControllerInput) {
         guard case .button(.l3, pressed: false) = input else { return }
         l3State = .idle
+    }
+
+    private static func systemGesture(
+        for input: ControllerInput
+    ) -> SystemGestureInput? {
+        guard case let .button(button, pressed) = input else { return nil }
+        switch button {
+        case .l3:
+            return .l3(pressed: pressed)
+        case .share:
+            return .share(pressed: pressed)
+        default:
+            return nil
+        }
     }
 }
 
