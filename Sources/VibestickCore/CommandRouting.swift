@@ -28,10 +28,33 @@ public enum AppContextClassifier {
         name: String,
         herdrDetected: Bool
     ) -> FocusedApp {
-        FocusedApp(
+        guard GhosttyPreset.matches(bundleID), herdrDetected else {
+            return FocusedApp(bundleID: bundleID, name: name)
+        }
+        return FocusedApp(
             bundleID: bundleID,
-            name: herdrDetected ? "\(name) · Herdr" : name,
-            isHerdr: herdrDetected
+            name: "\(name) · Herdr",
+            context: .herdr
         )
+    }
+}
+
+public enum HerdrSurfaceIdentifier {
+    public static func matches(
+        focusedWindowTitle: String?,
+        focusedHerdrPaneTitles: [String]
+    ) -> Bool {
+        guard let focusedWindowTitle else { return false }
+        let normalizedWindowTitle = normalize(focusedWindowTitle)
+        let hasHerdrBrand = normalizedWindowTitle.hasPrefix("π > ") ||
+            normalizedWindowTitle.hasPrefix("π - ")
+        guard hasHerdrBrand else { return false }
+        return focusedHerdrPaneTitles.contains {
+            normalize($0) == normalizedWindowTitle
+        }
+    }
+
+    private static func normalize(_ title: String) -> String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }

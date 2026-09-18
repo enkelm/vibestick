@@ -530,6 +530,23 @@ public enum BindingAction: Equatable, Codable {
     }
 }
 
+public enum BindingSource: Equatable {
+    case operatorOverride
+    case preset
+    case globalFallback
+    case unbound
+}
+
+public struct ResolvedBinding: Equatable {
+    public let action: BindingAction
+    public let source: BindingSource
+
+    public init(action: BindingAction, source: BindingSource) {
+        self.action = action
+        self.source = source
+    }
+}
+
 public enum HerdrPreset {
     private static let prefix = KeyChord(keyCode: 11, modifiers: [.control]) // ctrl+b
 
@@ -554,7 +571,7 @@ public enum SlackPreset {
     static let bundleIDs = ["com.tinyspeck.slackmacgap"]
 
     public static func matches(_ bundleID: String) -> Bool {
-        bundleIDs.contains(bundleID) || bundleID.localizedCaseInsensitiveContains("slack")
+        bundleIDs.contains(bundleID)
     }
 
     /// Slack documents Command-Shift-H for starting, joining, leaving, or
@@ -576,19 +593,27 @@ public enum SlackPreset {
 }
 
 public enum GhosttyPreset {
+    static let bundleIDs = ["com.mitchellh.ghostty"]
+
     public static func matches(_ bundleID: String) -> Bool {
-        bundleID.localizedCaseInsensitiveContains("ghostty")
+        bundleIDs.contains(bundleID)
     }
 
-    /// Fallback bindings for ordinary Ghostty surfaces. Herdr surfaces use
-    /// HerdrPreset instead, detected from the focused terminal title.
+    /// Conservative bindings for ordinary Ghostty surfaces. Herdr surfaces
+    /// use HerdrPreset instead, after their focused terminal title is
+    /// positively correlated with Herdr's focused pane.
     static let bindings: [PadButton: BindingAction] = [
-        .a: .key(KeyChord(keyCode: 17, modifiers: [.command])),
-        .b: .key(KeyChord(keyCode: 13, modifiers: [.command])),
-        .x: .key(KeyChord(keyCode: 33, modifiers: [.command, .shift])),
-        .y: .key(KeyChord(keyCode: 30, modifiers: [.command, .shift])),
-        .lb: .key(KeyChord(keyCode: 45, modifiers: [.command])),
-        .start: .key(KeyChord(keyCode: 50, modifiers: [.command, .option])),
+        .a: .key(KeyChord(keyCode: 36)), // Return
+        .b: .key(KeyChord(keyCode: 49)), // Space
+        .x: .key(KeyChord(keyCode: 53)), // Escape
+        .y: .key(KeyChord(keyCode: 48)), // Tab
+        .lb: .key(KeyChord(keyCode: 33, modifiers: [.command, .shift])), // previous tab
+        .rb: .key(KeyChord(keyCode: 30, modifiers: [.command, .shift])), // next tab
+        .start: .key(KeyChord(keyCode: 17, modifiers: [.command])), // new tab
+        .dpadUp: .key(KeyChord(keyCode: 126)),
+        .dpadDown: .key(KeyChord(keyCode: 125)),
+        .dpadLeft: .key(KeyChord(keyCode: 123)),
+        .dpadRight: .key(KeyChord(keyCode: 124)),
     ]
 }
 
@@ -628,28 +653,15 @@ private enum HerdrSurfaceDetector {
               let response = try? JSONDecoder().decode(Response.self, from: data)
         else { return false }
 
-        guard let windowTitle = focusedWindowTitle(processID: application.processIdentifier) else {
-            return true
-        }
-        let titles = response.result.snapshot.panes.flatMap {
-            [$0.terminalTitle, $0.terminalTitleStripped].compactMap { $0 }
-        }
-        let normalizedWindow = windowTitle.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if titles.contains(where: {
-            let normalizedTitle = $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return !normalizedTitle.isEmpty &&
-                (normalizedWindow == normalizedTitle ||
-                 normalizedWindow.contains(normalizedTitle) ||
-                 normalizedTitle.contains(normalizedWindow))
-        }) {
-            return true
-        }
-
-        // Ghostty currently exposes its shell title, not Herdr's terminal
-        // title, so title matching cannot distinguish surfaces reliably.
-        // Prefer Herdr while its server is live; ordinary Ghostty resumes
-        // native bindings as soon as the server is unavailable.
-        return true
+        let snapshot = response.result.snapshot
+        let focusedPaneTitles = snapshot.panes
+            .first { $0.paneID == snapshot.focusedPaneID }
+            .map { [$0.terminalTitle, $0.terminalTitleStripped].compactMap { $0 } }
+            ?? []
+        return HerdrSurfaceIdentifier.matches(
+            focusedWindowTitle: focusedWindowTitle(processID: application.processIdentifier),
+            focusedHerdrPaneTitles: focusedPaneTitles
+        )
     }
 
     private static func snapshotData() -> Data? {
@@ -701,29 +713,80 @@ private enum HerdrSurfaceDetector {
 
 public enum AppPresetCatalog {
     public static func bindings(for app: FocusedApp) -> [PadButton: BindingAction]? {
-        if app.isHerdr { return HerdrPreset.bindings }
-        if SlackPreset.matches(app.bundleID) { return SlackPreset.bindings }
-        if GhosttyPreset.matches(app.bundleID) { return GhosttyPreset.bindings }
-        return nil
+        preset(for: app)?.bindings
     }
 
     public static func name(for app: FocusedApp) -> String? {
-        if app.isHerdr { return "Herdr" }
-        if SlackPreset.matches(app.bundleID) { return "Slack" }
-        if GhosttyPreset.matches(app.bundleID) { return "Ghostty" }
-        return nil
+        preset(for: app)?.name
+    }
+
+    private struct Preset {
+        let name: String
+        let bindings: [PadButton: BindingAction]
+    }
+
+    private static func preset(for app: FocusedApp) -> Preset? {
+        switch app.context {
+        case .herdr:
+            return Preset(name: "Herdr", bindings: HerdrPreset.bindings)
+        case .ordinaryGhostty:
+            return Preset(name: "Ghostty", bindings: GhosttyPreset.bindings)
+        case .slack:
+            return Preset(name: "Slack", bindings: SlackPreset.bindings)
+        case .unknown:
+            return nil
+        }
+    }
+}
+
+public enum AppContext: Equatable {
+    case herdr
+    case ordinaryGhostty
+    case slack
+    case unknown
+}
+
+struct AppProfileKey: RawRepresentable, Hashable {
+    let rawValue: String
+
+    init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    static func herdr(bundleID: String) -> AppProfileKey {
+        AppProfileKey(rawValue: "herdr:\(bundleID)")
     }
 }
 
 public struct FocusedApp: Equatable {
     public let bundleID: String
     public let name: String
-    public let isHerdr: Bool
+    public let context: AppContext
 
-    public init(bundleID: String, name: String, isHerdr: Bool = false) {
+    public init(bundleID: String, name: String) {
         self.bundleID = bundleID
         self.name = name
-        self.isHerdr = isHerdr
+        if GhosttyPreset.matches(bundleID) {
+            context = .ordinaryGhostty
+        } else if SlackPreset.matches(bundleID) {
+            context = .slack
+        } else {
+            context = .unknown
+        }
+    }
+
+    init(bundleID: String, name: String, context: AppContext) {
+        self.bundleID = bundleID
+        self.name = name
+        self.context = context
+    }
+
+    public var isHerdr: Bool { context == .herdr }
+
+    var profileKey: AppProfileKey {
+        context == .herdr
+            ? AppProfileKey.herdr(bundleID: bundleID)
+            : AppProfileKey(rawValue: bundleID)
     }
 
     static let unknown = FocusedApp(bundleID: "", name: "Unknown app")
@@ -785,21 +848,29 @@ public final class ProfileStore: ObservableObject {
         if editingGlobal {
             return configuration.globalFallbackBindings[button] ?? .none
         }
-        return configuration.appProfiles[editingApp.bundleID]?[button]
-            ?? AppPresetCatalog.bindings(for: editingApp)?[button]
-            ?? configuration.globalFallbackBindings[button]
-            ?? .none
+        return resolvedBinding(for: button, app: editingApp).action
     }
 
     public func action(for button: PadButton, app: FocusedApp) -> BindingAction {
-        configuration.appProfiles[app.bundleID]?[button]
-            ?? AppPresetCatalog.bindings(for: app)?[button]
-            ?? configuration.globalFallbackBindings[button]
-            ?? .none
+        resolvedBinding(for: button, app: app).action
+    }
+
+    public func resolvedBinding(for button: PadButton, app: FocusedApp) -> ResolvedBinding {
+        if let action = configuration.appProfiles[app.profileKey.rawValue]?[button] {
+            return ResolvedBinding(action: action, source: .operatorOverride)
+        }
+        if let action = AppPresetCatalog.bindings(for: app)?[button] {
+            return ResolvedBinding(action: action, source: .preset)
+        }
+        if let action = configuration.globalFallbackBindings[button] {
+            return ResolvedBinding(action: action, source: .globalFallback)
+        }
+        return ResolvedBinding(action: .none, source: .unbound)
     }
 
     public func isOverride(for button: PadButton) -> Bool {
-        !editingGlobal && configuration.appProfiles[editingApp.bundleID]?[button] != nil
+        !editingGlobal &&
+            configuration.appProfiles[editingApp.profileKey.rawValue]?[button] != nil
     }
 
     public func isAppDefault(for button: PadButton) -> Bool {
@@ -818,9 +889,10 @@ public final class ProfileStore: ObservableObject {
                 announce("No focused app bundle ID; binding was not saved")
                 return
             }
-            var profile = configuration.appProfiles[editingApp.bundleID] ?? [:]
+            let profileKey = editingApp.profileKey.rawValue
+            var profile = configuration.appProfiles[profileKey] ?? [:]
             profile[button] = action
-            configuration.appProfiles[editingApp.bundleID] = profile
+            configuration.appProfiles[profileKey] = profile
             announce("\(editingApp.name) · \(button.title) → \(action.displayName)")
         }
         save()
@@ -829,9 +901,9 @@ public final class ProfileStore: ObservableObject {
     public func resetEditingApp() {
         guard !editingApp.bundleID.isEmpty else { return }
         guard configurationAllowsChanges() else { return }
-        configuration.appProfiles.removeValue(forKey: editingApp.bundleID)
+        configuration.appProfiles.removeValue(forKey: editingApp.profileKey.rawValue)
         save()
-        announce("Reset \(editingApp.name) to global defaults")
+        announce("Reset \(editingApp.name) to inherited defaults")
     }
 
     public func systemBinding(for binding: SystemBinding) -> BindingAction {
@@ -856,6 +928,14 @@ public final class ProfileStore: ObservableObject {
 
     public func stickMapping(for input: StickInput) -> StickMapping {
         configuration.stickMappings[input] ?? .none
+    }
+
+    public func stickMapping(for input: StickInput, app: FocusedApp) -> StickMapping {
+        let hasAppProfile = configuration.appProfiles[app.profileKey.rawValue] != nil
+        guard app.context != .unknown || hasAppProfile else {
+            return .none
+        }
+        return stickMapping(for: input)
     }
 
     public func setStickMapping(_ mapping: StickMapping, for input: StickInput) {
