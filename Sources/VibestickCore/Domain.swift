@@ -698,15 +698,6 @@ public struct FocusedApp: Equatable {
     static let unknown = FocusedApp(bundleID: "", name: "Unknown app")
 }
 
-
-
-
-
-private struct PersistedConfig: Codable {
-    public var global: [String: BindingAction]
-    public var apps: [String: [String: BindingAction]]
-}
-
 @MainActor
 public final class ProfileStore: ObservableObject {
     @Published public private(set) var focusedApp = FocusedApp.unknown
@@ -714,25 +705,12 @@ public final class ProfileStore: ObservableObject {
     @Published public private(set) var devices: [ConnectedDevice] = []
     @Published public private(set) var status = "Waiting for an Xbox controller"
     @Published public private(set) var accessibilityGranted = CGPreflightPostEventAccess()
+    @Published public private(set) var configuration = VibestickConfiguration.defaults
+    @Published public private(set) var configurationLoadOutcome: ConfigurationLoadOutcome = .notLoaded
+    @Published public private(set) var configurationNotice: String?
     @Published public var editingGlobal = false
 
-    private var global: [PadButton: BindingAction] = [:]
-    private var appProfiles: [String: [PadButton: BindingAction]] = [:]
     private let storageURL: URL?
-
-    private static let defaultBindings: [PadButton: BindingAction] = [
-        .a: .key(KeyChord(keyCode: 49)),
-        .b: .key(KeyChord(keyCode: 53)),
-        .x: .none,
-        .y: .none,
-        .lb: .none,
-        .rb: .none,
-        .lt: .none,
-        .rt: .none,
-        .back: .overlay,
-        .start: .switchApp,
-        .guide: .none,
-    ]
 
     public init(storageURL: URL? = nil, loadFromDisk: Bool = true) {
         if let storageURL {
@@ -741,7 +719,6 @@ public final class ProfileStore: ObservableObject {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             self.storageURL = appSupport.appendingPathComponent("Vibestick/config.json")
         }
-        global = Self.defaultBindings
         if loadFromDisk { load() }
     }
     public func refreshFocus(excluding bundleID: String? = Bundle.main.bundleIdentifier) {
@@ -774,22 +751,24 @@ public final class ProfileStore: ObservableObject {
     }
 
     public func binding(for button: PadButton) -> BindingAction {
-        if editingGlobal { return global[button] ?? .none }
-        return appProfiles[editingApp.bundleID]?[button]
+        if editingGlobal {
+            return configuration.globalFallbackBindings[button] ?? .none
+        }
+        return configuration.appProfiles[editingApp.bundleID]?[button]
             ?? AppPresetCatalog.bindings(for: editingApp)?[button]
-            ?? global[button]
+            ?? configuration.globalFallbackBindings[button]
             ?? .none
     }
 
     public func action(for button: PadButton, app: FocusedApp) -> BindingAction {
-        appProfiles[app.bundleID]?[button]
+        configuration.appProfiles[app.bundleID]?[button]
             ?? AppPresetCatalog.bindings(for: app)?[button]
-            ?? global[button]
+            ?? configuration.globalFallbackBindings[button]
             ?? .none
     }
 
     public func isOverride(for button: PadButton) -> Bool {
-        !editingGlobal && appProfiles[editingApp.bundleID]?[button] != nil
+        !editingGlobal && configuration.appProfiles[editingApp.bundleID]?[button] != nil
     }
 
     public func isAppDefault(for button: PadButton) -> Bool {
@@ -798,19 +777,19 @@ public final class ProfileStore: ObservableObject {
             AppPresetCatalog.bindings(for: editingApp)?[button] != nil
     }
 
-
     public func setBinding(_ action: BindingAction, for button: PadButton) {
+        guard configurationAllowsChanges() else { return }
         if editingGlobal {
-            global[button] = action
+            configuration.globalFallbackBindings[button] = action
             announce("Global · \(button.title) → \(action.displayName)")
         } else {
             guard !editingApp.bundleID.isEmpty else {
                 announce("No focused app bundle ID; binding was not saved")
                 return
             }
-            var profile = appProfiles[editingApp.bundleID] ?? [:]
+            var profile = configuration.appProfiles[editingApp.bundleID] ?? [:]
             profile[button] = action
-            appProfiles[editingApp.bundleID] = profile
+            configuration.appProfiles[editingApp.bundleID] = profile
             announce("\(editingApp.name) · \(button.title) → \(action.displayName)")
         }
         save()
@@ -818,9 +797,40 @@ public final class ProfileStore: ObservableObject {
 
     public func resetEditingApp() {
         guard !editingApp.bundleID.isEmpty else { return }
-        appProfiles.removeValue(forKey: editingApp.bundleID)
+        guard configurationAllowsChanges() else { return }
+        configuration.appProfiles.removeValue(forKey: editingApp.bundleID)
         save()
         announce("Reset \(editingApp.name) to global defaults")
+    }
+
+    public func systemBinding(for binding: SystemBinding) -> BindingAction {
+        configuration.systemBindings[binding] ?? .none
+    }
+
+    public func setSystemBinding(_ action: BindingAction, for binding: SystemBinding) {
+        guard configurationAllowsChanges() else { return }
+        configuration.systemBindings[binding] = action
+        save()
+    }
+
+    public func herdrLayerOverride(for button: PadButton) -> BindingAction? {
+        configuration.herdrLayerOverrides[button]
+    }
+
+    public func setHerdrLayerOverride(_ action: BindingAction?, for button: PadButton) {
+        guard configurationAllowsChanges() else { return }
+        configuration.herdrLayerOverrides[button] = action
+        save()
+    }
+
+    public func stickMapping(for input: StickInput) -> StickMapping {
+        configuration.stickMappings[input] ?? .none
+    }
+
+    public func setStickMapping(_ mapping: StickMapping, for input: StickInput) {
+        guard configurationAllowsChanges() else { return }
+        configuration.stickMappings[input] = mapping
+        save()
     }
 
     public func setDevices(_ devices: [ConnectedDevice]) {
@@ -839,47 +849,41 @@ public final class ProfileStore: ObservableObject {
         app.bundleID.isEmpty ? app.name : "\(app.name) · \(app.bundleID)"
     }
 
+    private func configurationAllowsChanges() -> Bool {
+        guard configurationLoadOutcome.allowsSaving else {
+            announce(configurationNotice ?? "Configuration is read-only")
+            return false
+        }
+        return true
+    }
+
     private func load() {
-        guard let storageURL, FileManager.default.fileExists(atPath: storageURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: storageURL)
-            let decoded = try JSONDecoder().decode(PersistedConfig.self, from: data)
-            global = Self.decodeBindings(decoded.global, fallback: Self.defaultBindings)
-            appProfiles = decoded.apps.mapValues { Self.decodeBindings($0, fallback: [:]) }
+        guard let storageURL else { return }
+        let result = ConfigurationPersistence.load(from: storageURL)
+        configuration = result.configuration
+        configurationLoadOutcome = result.outcome
+        configurationNotice = result.outcome.operatorNotice
+        if let configurationNotice {
+            status = configurationNotice
+        } else if result.outcome == .loaded {
             status = "Loaded bindings from \(storageURL.lastPathComponent)"
-        } catch {
-            status = "Could not load bindings; using defaults (\(error.localizedDescription))"
         }
     }
 
     private func save() {
         guard let storageURL else { return }
+        guard configurationLoadOutcome.allowsSaving else {
+            status = configurationNotice ?? "Configuration is read-only"
+            return
+        }
         do {
-            try FileManager.default.createDirectory(
-                at: storageURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let config = PersistedConfig(
-                global: global.reduce(into: [:]) { $0[$1.key.rawValue] = $1.value },
-                apps: appProfiles.reduce(into: [:]) { result, profile in
-                    result[profile.key] = profile.value.reduce(into: [:]) { $0[$1.key.rawValue] = $1.value }
-                }
-            )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(config)
-            try data.write(to: storageURL, options: .atomic)
+            try ConfigurationPersistence.save(configuration, to: storageURL)
+            if configurationLoadOutcome == .notLoaded || configurationLoadOutcome == .noFile {
+                configurationLoadOutcome = .loaded
+            }
         } catch {
             status = "Could not save bindings (\(error.localizedDescription))"
-        }
-    }
-
-    private static func decodeBindings(
-        _ values: [String: BindingAction],
-        fallback: [PadButton: BindingAction]
-    ) -> [PadButton: BindingAction] {
-        values.reduce(into: fallback) { result, entry in
-            if let button = PadButton(rawValue: entry.key) { result[button] = entry.value }
+            configurationNotice = status
         }
     }
 }

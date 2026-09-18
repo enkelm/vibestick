@@ -613,6 +613,13 @@ struct OverlayView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+            if let configurationNotice = state.configurationNotice {
+                Text(configurationNotice)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(2)
+            }
             HStack(spacing: 8) {
                 Text("Hold L3 for app wheel · A opens · B closes")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
@@ -743,6 +750,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         print("Controller: \(controllerDescription)")
         print("Focused app: \(state.describe(state.focusedApp))")
         print("Status: \(state.status)")
+        if let configurationNotice = state.configurationNotice {
+            print("Configuration: \(configurationNotice)")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -808,9 +818,10 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
         let devices = reader?.connectedDevices() ?? []
         let deviceText = devices.isEmpty ? "No real Xbox HID gamepad found." : devices.map(\.displayName).joined(separator: "\n")
         let permission = state.accessibilityGranted ? "Keyboard output: allowed" : "Keyboard output: Accessibility required"
+        let configuration = state.configurationNotice.map { "\nConfiguration: \($0)\n" } ?? ""
         let alert = NSAlert()
         alert.messageText = "Vibestick status"
-        alert.informativeText = "\(deviceText)\n\n\(permission)\nOutput: \(outputEnabled ? "enabled" : "off")\nApp wheel: always active · hold L3\nOwner: standalone Vibestick\n\nStop Herdr's gamepad plugin before enabling this listener."
+        alert.informativeText = "\(deviceText)\n\n\(permission)\nOutput: \(outputEnabled ? "enabled" : "off")\nApp wheel: always active · hold L3\nOwner: standalone Vibestick\n\(configuration)\nStop Herdr's gamepad plugin before enabling this listener."
         alert.runModal()
     }
 
