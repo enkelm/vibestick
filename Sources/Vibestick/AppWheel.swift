@@ -1,28 +1,6 @@
 import AppKit
 import SwiftUI
-
-// MARK: - Radial app selection
-
-enum RadialSelection {
-    static let deadZone = 0.42
-
-    /// Controller Y is positive when the stick is pushed up, while SwiftUI Y
-    /// increases toward the bottom of the screen.
-    static func index(
-        x: Double,
-        y: Double,
-        itemCount: Int,
-        deadZone: Double = deadZone
-    ) -> Int? {
-        guard itemCount > 0, hypot(x, y) >= deadZone else { return nil }
-
-        let fullTurn = Double.pi * 2
-        let sector = fullTurn / Double(itemCount)
-        var clockwiseFromTop = atan2(-y, x) + Double.pi / 2
-        if clockwiseFromTop < 0 { clockwiseFromTop += fullTurn }
-        return Int((clockwiseFromTop + sector / 2) / sector) % itemCount
-    }
-}
+import VibestickCore
 
 struct AppWheelItem: Identifiable {
     let id: pid_t
