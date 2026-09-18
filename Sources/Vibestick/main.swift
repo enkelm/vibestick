@@ -989,6 +989,10 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Reclassify at the point of output so switching between Herdr and an
+        // ordinary Ghostty window cannot use the periodic refresh's stale
+        // context.
+        state.refreshFocus()
         let action = state.action(for: button, app: state.focusedApp)
         if action == .overlay {
             overlay.open()

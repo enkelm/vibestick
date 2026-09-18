@@ -97,17 +97,8 @@ final class ConfigurationPersistenceTests: XCTestCase {
             bundleID: "com.example.target",
             name: "Prototype app"
         )
-        let herdr = FocusedApp(
-            bundleID: "com.example.target",
-            name: "Prototype app · Herdr",
-            isHerdr: true
-        )
         XCTAssertEqual(
             migrated.action(for: .x, app: ordinary),
-            .key(KeyChord(keyCode: 53))
-        )
-        XCTAssertEqual(
-            migrated.action(for: .x, app: herdr),
             .key(KeyChord(keyCode: 53))
         )
         XCTAssertTrue(migrated.configuration.herdrLayerOverrides.isEmpty)
@@ -115,6 +106,101 @@ final class ConfigurationPersistenceTests: XCTestCase {
         let reloaded = ProfileStore(storageURL: url)
         XCTAssertEqual(reloaded.configurationLoadOutcome, .loaded)
         XCTAssertEqual(reloaded.configuration, migrated.configuration)
+    }
+
+    func testVersionOneGhosttyProfileMigratesToBothGhosttyContexts() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VibestickConfigurationTests-\(UUID().uuidString)")
+        let url = directory.appendingPathComponent("config.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let versionOne = Data(
+            """
+            {
+              "schemaVersion": 1,
+              "systemBindings": {},
+              "globalFallbackBindings": {},
+              "appProfiles": {
+                "com.mitchellh.ghostty": {
+                  "a": {"kind": "key", "keyCode": 7, "modifiers": 4}
+                }
+              },
+              "herdrLayerOverrides": {},
+              "stickMappings": {}
+            }
+            """.utf8
+        )
+        try versionOne.write(to: url)
+
+        let migrated = ProfileStore(storageURL: url)
+        guard case let .migrated(report) = migrated.configurationLoadOutcome else {
+            return XCTFail("Expected the version-one configuration to migrate")
+        }
+        XCTAssertEqual(try Data(contentsOf: report.backupURL), versionOne)
+        XCTAssertEqual(migrated.configuration.schemaVersion, 2)
+
+        let ordinary = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: false
+        )
+        let herdr = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: true
+        )
+        let preserved = BindingAction.key(KeyChord(keyCode: 7, modifiers: [.option]))
+        XCTAssertEqual(migrated.action(for: .a, app: ordinary), preserved)
+        XCTAssertEqual(migrated.action(for: .a, app: herdr), preserved)
+
+        let reloaded = ProfileStore(storageURL: url)
+        XCTAssertEqual(reloaded.configurationLoadOutcome, .loaded)
+        XCTAssertEqual(reloaded.configuration, migrated.configuration)
+    }
+
+    func testPrototypeGhosttyProfileMigratesToBothGhosttyContexts() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VibestickConfigurationTests-\(UUID().uuidString)")
+        let url = directory.appendingPathComponent("config.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        try Data(
+            """
+            {
+              "global": {},
+              "apps": {
+                "com.mitchellh.ghostty": {
+                  "a": {"kind": "key", "keyCode": 7, "modifiers": 4}
+                }
+              }
+            }
+            """.utf8
+        ).write(to: url)
+
+        let migrated = ProfileStore(storageURL: url)
+        guard case .migrated = migrated.configurationLoadOutcome else {
+            return XCTFail("Expected the prototype configuration to migrate")
+        }
+
+        let ordinary = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: false
+        )
+        let herdr = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: true
+        )
+        let preserved = BindingAction.key(KeyChord(keyCode: 7, modifiers: [.option]))
+        XCTAssertEqual(migrated.action(for: .a, app: ordinary), preserved)
+        XCTAssertEqual(migrated.action(for: .a, app: herdr), preserved)
     }
 
     func testPartialMigrationKeepsRecognizedSparseEntriesAndReportsSkippedPaths() throws {
@@ -170,10 +256,7 @@ final class ConfigurationPersistenceTests: XCTestCase {
             migrated.configuration.globalFallbackBindings[.a],
             .key(KeyChord(keyCode: 36, modifiers: [.command]))
         )
-        XCTAssertEqual(
-            migrated.configuration.globalFallbackBindings[.b],
-            .key(KeyChord(keyCode: 53))
-        )
+        XCTAssertNil(migrated.configuration.globalFallbackBindings[.b])
         XCTAssertTrue(migrated.configurationNotice?.contains("4 skipped entries") == true)
         XCTAssertTrue(migrated.configurationNotice?.contains("global.b") == true)
     }
