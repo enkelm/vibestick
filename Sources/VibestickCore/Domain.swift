@@ -975,6 +975,12 @@ public final class ProfileStore: ObservableObject {
         save()
     }
 
+    public func setStickTuning(_ tuning: StickTuning) {
+        guard configurationAllowsChanges() else { return }
+        configuration.stickTuning = tuning
+        save()
+    }
+
     public func setDevices(_ devices: [ConnectedDevice]) {
         self.devices = devices
     }

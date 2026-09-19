@@ -32,6 +32,18 @@ public enum InputRoute: Equatable {
     )
     case herdrLayer(ControllerInput, action: BindingAction?)
     case appBinding(ControllerInput, action: BindingAction?)
+
+    public var cancelsRepeatingStickInput: Bool {
+        switch self {
+        case .capture, .appWheel, .herdrLayer:
+            return true
+        case let .systemGesture(input, _, _):
+            guard case .button(.share, _) = input else { return true }
+            return false
+        case .appBinding:
+            return false
+        }
+    }
 }
 
 /// The boundary between normalized controller events, ownership, profile

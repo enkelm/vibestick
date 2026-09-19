@@ -103,13 +103,14 @@ public enum StickMapping: Equatable, Codable {
 }
 
 public struct VibestickConfiguration: Equatable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public internal(set) var schemaVersion: Int
     public internal(set) var systemBindings: [SystemBinding: BindingAction]
     public internal(set) var globalFallbackBindings: [PadButton: BindingAction]
     public internal(set) var appProfiles: [String: [PadButton: BindingAction]]
     public internal(set) var herdrLayerOverrides: [PadButton: BindingAction]
+    public internal(set) var stickTuning: StickTuning
     public internal(set) var stickMappings: [StickInput: StickMapping]
 
     static let defaults = VibestickConfiguration(
@@ -127,6 +128,7 @@ public struct VibestickConfiguration: Equatable {
         globalFallbackBindings: [:],
         appProfiles: [:],
         herdrLayerOverrides: [:],
+        stickTuning: .defaults,
         stickMappings: [
             .leftUp: .key(KeyChord(keyCode: 126)),
             .leftDown: .key(KeyChord(keyCode: 125)),
@@ -207,6 +209,7 @@ private struct PersistedConfiguration: Codable {
     let appProfiles: [String: [String: BindingAction]]
     let herdrLayerOverrides: [String: BindingAction]
     let stickMappings: [String: StickMapping]
+    let stickTuning: StickTuning?
 
     init(configuration: VibestickConfiguration) {
         schemaVersion = configuration.schemaVersion
@@ -215,11 +218,16 @@ private struct PersistedConfiguration: Codable {
         appProfiles = configuration.appProfiles.mapValues(\.stringKeyed)
         herdrLayerOverrides = configuration.herdrLayerOverrides.stringKeyed
         stickMappings = configuration.stickMappings.stringKeyed
+        stickTuning = configuration.stickTuning
     }
 
     func configuration(expectedSchemaVersion: Int) throws -> VibestickConfiguration {
         guard schemaVersion == expectedSchemaVersion else {
             throw ConfigurationPersistenceError.invalidSchemaVersion(schemaVersion)
+        }
+        if expectedSchemaVersion == VibestickConfiguration.currentSchemaVersion,
+           stickTuning == nil {
+            throw ConfigurationPersistenceError.missingKey("stickTuning")
         }
         return VibestickConfiguration(
             schemaVersion: schemaVersion,
@@ -227,6 +235,7 @@ private struct PersistedConfiguration: Codable {
             globalFallbackBindings: try globalFallbackBindings.typedKeys(as: PadButton.self),
             appProfiles: try appProfiles.mapValues { try $0.typedKeys(as: PadButton.self) },
             herdrLayerOverrides: try herdrLayerOverrides.typedKeys(as: PadButton.self),
+            stickTuning: stickTuning ?? .defaults,
             stickMappings: try stickMappings.typedKeys(as: StickInput.self)
         )
     }
@@ -255,6 +264,7 @@ private extension Dictionary where Key == String {
 private enum ConfigurationPersistenceError: LocalizedError {
     case invalidRoot
     case invalidSchemaVersion(Int)
+    case missingKey(String)
     case unknownKey(String)
     case unrecognizedPrototype
 
@@ -264,6 +274,8 @@ private enum ConfigurationPersistenceError: LocalizedError {
             return "the top level must be a JSON object"
         case let .invalidSchemaVersion(version):
             return "unsupported schema version \(version)"
+        case let .missingKey(key):
+            return "missing configuration key \(key)"
         case let .unknownKey(key):
             return "unrecognized configuration key \(key)"
         case .unrecognizedPrototype:
@@ -315,9 +327,10 @@ enum ConfigurationPersistence {
                     outcome: .unsupportedFutureVersion(version)
                 )
             }
-            if version == 1 {
+            if version == 1 || version == 2 {
                 do {
-                    let migration = try migrateVersionOne(
+                    let migration = try migrateVersionedConfiguration(
+                        version: version,
                         originalData: originalData,
                         at: url
                     )
@@ -389,7 +402,8 @@ enum ConfigurationPersistence {
         return integer
     }
 
-    private static func migrateVersionOne(
+    private static func migrateVersionedConfiguration(
+        version: Int,
         originalData: Data,
         at url: URL
     ) throws -> (
@@ -397,9 +411,11 @@ enum ConfigurationPersistence {
         report: ConfigurationMigrationReport
     ) {
         let wire = try JSONDecoder().decode(PersistedConfiguration.self, from: originalData)
-        var configuration = try wire.configuration(expectedSchemaVersion: 1)
+        var configuration = try wire.configuration(expectedSchemaVersion: version)
         configuration.schemaVersion = VibestickConfiguration.currentSchemaVersion
-        preserveGhosttyProfilesInHerdr(configuration: &configuration)
+        if version == 1 {
+            preserveGhosttyProfilesInHerdr(configuration: &configuration)
+        }
 
         let backupURL = nextBackupURL(for: url)
         try originalData.write(to: backupURL, options: .withoutOverwriting)

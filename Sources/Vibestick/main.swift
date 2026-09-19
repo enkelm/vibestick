@@ -11,6 +11,8 @@ import VibestickCore
 
 @MainActor
 final class MacActions: OutputAction {
+    private static let naturalScrollingKey = "com.apple.swipescrolldirection"
+
     private let state: ProfileStore
     private let appActivated: () -> Void
 
@@ -41,8 +43,18 @@ final class MacActions: OutputAction {
         }
     }
 
-    private func postKey(_ chord: KeyChord, target: FocusedApp, announce: Bool = true) {
+    func perform(_ mapping: StickMapping, target: FocusedApp) {
+        switch mapping {
+        case .none:
+            return
+        case let .key(chord):
+            postKey(chord, target: target, announce: false)
+        case let .scroll(direction):
+            postScroll(direction)
+        }
+    }
 
+    private func postKey(_ chord: KeyChord, target: FocusedApp, announce: Bool = true) {
         state.setAccessibility()
         guard state.accessibilityGranted else {
             state.announce("Accessibility is required; no key sent")
@@ -68,6 +80,32 @@ final class MacActions: OutputAction {
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
         if announce { state.announce("Sent \(chord.displayName) to \(target.name)") }
+    }
+
+    private func postScroll(_ direction: ScrollDirection) {
+        state.setAccessibility()
+        guard state.accessibilityGranted else {
+            state.announce("Accessibility is required; no scroll sent")
+            return
+        }
+        let naturalScrolling = (
+            UserDefaults.standard.object(forKey: Self.naturalScrollingKey) as? NSNumber
+        )?.boolValue ?? true
+        let delta = direction.delta(naturalScrolling: naturalScrolling)
+        guard let source = CGEventSource(stateID: .combinedSessionState),
+              let event = CGEvent(
+                scrollWheelEvent2Source: source,
+                units: .line,
+                wheelCount: 2,
+                wheel1: delta.vertical,
+                wheel2: delta.horizontal,
+                wheel3: 0
+              )
+        else {
+            state.announce("Could not create scroll event")
+            return
+        }
+        event.post(tap: .cghidEventTap)
     }
 
     private func switchToNextApp() {
@@ -98,7 +136,19 @@ final class MacActions: OutputAction {
 // MARK: - Overlay state and key capture
 @MainActor
 final class OverlayUIState: ObservableObject {
-    @Published var captureButton: PadButton?
+    @Published var captureButton: PadButton? {
+        didSet {
+            if oldValue == nil, captureButton != nil {
+                onCaptureStarted()
+            }
+        }
+    }
+
+    private let onCaptureStarted: () -> Void
+
+    init(onCaptureStarted: @escaping () -> Void) {
+        self.onCaptureStarted = onCaptureStarted
+    }
 }
 
 
@@ -195,11 +245,17 @@ final class KeyCaptureNSView: NSView {
 final class OverlayController {
     private let state: ProfileStore
     private let visual: ControllerVisualState
-    private let uiState = OverlayUIState()
+    private let uiState: OverlayUIState
     private var panel: OverlayPanel?
-    init(state: ProfileStore, visual: ControllerVisualState) {
+
+    init(
+        state: ProfileStore,
+        visual: ControllerVisualState,
+        onCaptureStarted: @escaping () -> Void
+    ) {
         self.state = state
         self.visual = visual
+        uiState = OverlayUIState(onCaptureStarted: onCaptureStarted)
     }
 
     var isVisible: Bool { panel?.isVisible == true }
@@ -718,9 +774,11 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     private var workspaceObserver: NSObjectProtocol?
     private var refreshTimer: Timer?
     private var appWheelHoldTimer: Timer?
+    private var stickRepeatTimer: Timer?
     private var appWheelSessionActive = false
     private var appWheelRecency = AppWheelRecency()
     private var commandRouter = CommandRouter()
+    private var stickRepeater: StickRepeater!
     private var outputLifecycle = OutputLifecycle()
     private var diagnostics: [ControllerDiagnosticRecord] = []
 
@@ -730,7 +788,12 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
             state: state,
             appActivated: { [weak self] in self?.scheduleFocusRefresh() }
         )
-        overlay = OverlayController(state: state, visual: visual)
+        stickRepeater = StickRepeater(tuning: state.configuration.stickTuning)
+        overlay = OverlayController(
+            state: state,
+            visual: visual,
+            onCaptureStarted: { [weak self] in self?.cancelStickRepeat() }
+        )
         appWheel = AppWheelController(
             state: state,
             appActivated: { [weak self] in self?.scheduleFocusRefresh() },
@@ -1043,6 +1106,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
 
     private func handle(_ route: InputRoute) {
         guard outputLifecycle.allows(route) else { return }
+        if route.cancelsRepeatingStickInput {
+            cancelStickRepeat()
+        }
 
         switch route {
         case .capture:
@@ -1052,11 +1118,76 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
             perform(action, from: input)
         case let .appWheel(input):
             handleAppWheelInput(input)
-        case let .systemGesture(input, _, action),
-             let .appBinding(input, action):
+        case let .systemGesture(input, _, action):
+            guard let action else { return }
+            perform(action, from: input)
+        case let .appBinding(input, action):
+            if case let .axis(axis, value) = input {
+                handleStick(axis: axis, value: value)
+                return
+            }
             guard let action else { return }
             perform(action, from: input)
         }
+    }
+
+    private func handleStick(axis: StickAxis, value: Double) {
+        let inputs = stickRepeater.update(
+            axis: axis,
+            value: value,
+            at: ProcessInfo.processInfo.systemUptime
+        )
+        emitStickInputs(inputs)
+        scheduleStickRepeat()
+    }
+
+    private func emitStickInputs(_ inputs: [StickInput]) {
+        guard outputLifecycle.mappedOutputAvailable else { return }
+        for input in inputs {
+            actions.perform(
+                state.stickMapping(for: input, app: state.focusedApp),
+                target: state.focusedApp
+            )
+        }
+    }
+
+    private func scheduleStickRepeat() {
+        stickRepeatTimer?.invalidate()
+        stickRepeatTimer = nil
+        guard let fireTime = stickRepeater.nextFireTime else { return }
+
+        let interval = max(
+            0.001,
+            fireTime - ProcessInfo.processInfo.systemUptime
+        )
+        stickRepeatTimer = Timer.scheduledTimer(
+            withTimeInterval: interval,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.stickRepeatTimer = nil
+                guard self.outputLifecycle.mappedOutputAvailable,
+                      !self.routingContext.captureActive,
+                      !self.routingContext.appWheelActive
+                else {
+                    self.cancelStickRepeat()
+                    return
+                }
+                self.emitStickInputs(
+                    self.stickRepeater.advance(
+                        to: ProcessInfo.processInfo.systemUptime
+                    )
+                )
+                self.scheduleStickRepeat()
+            }
+        }
+    }
+
+    private func cancelStickRepeat() {
+        stickRepeatTimer?.invalidate()
+        stickRepeatTimer = nil
+        stickRepeater?.cancel()
     }
 
     private func handleAppWheelInput(_ input: ControllerInput) {
@@ -1132,6 +1263,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         if cleanup.contains(.cancelPendingRoutes) {
             appWheelHoldTimer?.invalidate()
             appWheelHoldTimer = nil
+            cancelStickRepeat()
             commandRouter.resetTransientState()
         }
         if cleanup.contains(.closeAppWheel) {

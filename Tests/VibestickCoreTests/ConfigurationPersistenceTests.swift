@@ -25,6 +25,13 @@ final class ConfigurationPersistenceTests: XCTestCase {
         store.setSystemBinding(.none, for: .share)
         store.setHerdrLayerOverride(.key(KeyChord(keyCode: 45)), for: .rb)
         store.setStickMapping(.none, for: .rightLeft)
+        store.setStickTuning(
+            StickTuning(
+                deadZone: 0.3,
+                repeatDelay: 0.5,
+                repeatInterval: 0.1
+            )
+        )
 
         let reloaded = ProfileStore(storageURL: url)
         XCTAssertEqual(reloaded.configurationLoadOutcome, .loaded)
@@ -38,6 +45,14 @@ final class ConfigurationPersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.systemBinding(for: .share), .none)
         XCTAssertEqual(reloaded.herdrLayerOverride(for: .rb), .key(KeyChord(keyCode: 45)))
         XCTAssertEqual(reloaded.stickMapping(for: .rightLeft), .none)
+        XCTAssertEqual(
+            reloaded.configuration.stickTuning,
+            StickTuning(
+                deadZone: 0.3,
+                repeatDelay: 0.5,
+                repeatInterval: 0.1
+            )
+        )
 
         let json = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
@@ -51,6 +66,48 @@ final class ConfigurationPersistenceTests: XCTestCase {
         XCTAssertNotNil(json["appProfiles"])
         XCTAssertNotNil(json["herdrLayerOverrides"])
         XCTAssertNotNil(json["stickMappings"])
+        XCTAssertNotNil(json["stickTuning"])
+    }
+
+    func testVersionTwoConfigurationMigratesWithCentralStickTuning() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("VibestickConfigurationTests-\(UUID().uuidString)")
+        let url = directory.appendingPathComponent("config.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let versionTwo = Data(
+            """
+            {
+              "schemaVersion": 2,
+              "systemBindings": {},
+              "globalFallbackBindings": {},
+              "appProfiles": {},
+              "herdrLayerOverrides": {},
+              "stickMappings": {}
+            }
+            """.utf8
+        )
+        try versionTwo.write(to: url)
+
+        let migrated = ProfileStore(storageURL: url)
+        guard case let .migrated(report) = migrated.configurationLoadOutcome else {
+            return XCTFail("Expected the version-two configuration to migrate")
+        }
+
+        XCTAssertEqual(try Data(contentsOf: report.backupURL), versionTwo)
+        XCTAssertEqual(
+            migrated.configuration.schemaVersion,
+            VibestickConfiguration.currentSchemaVersion
+        )
+        XCTAssertEqual(migrated.configuration.stickTuning, .defaults)
+
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        XCTAssertNotNil(persisted["stickTuning"])
     }
 
     func testRecognizablePrototypeConfigurationMigratesOnceAndKeepsBackup() throws {
@@ -140,7 +197,10 @@ final class ConfigurationPersistenceTests: XCTestCase {
             return XCTFail("Expected the version-one configuration to migrate")
         }
         XCTAssertEqual(try Data(contentsOf: report.backupURL), versionOne)
-        XCTAssertEqual(migrated.configuration.schemaVersion, 2)
+        XCTAssertEqual(
+            migrated.configuration.schemaVersion,
+            VibestickConfiguration.currentSchemaVersion
+        )
 
         let ordinary = AppContextClassifier.classify(
             bundleID: "com.mitchellh.ghostty",
