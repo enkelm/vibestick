@@ -134,20 +134,55 @@ final class MacActions: OutputAction {
 }
 
 // MARK: - Overlay state and key capture
-@MainActor
-final class OverlayUIState: ObservableObject {
-    @Published var captureButton: PadButton? {
-        didSet {
-            if oldValue == nil, captureButton != nil {
-                onCaptureStarted()
-            }
+enum BindingEditTarget: Identifiable {
+    case button(PadButton)
+    case system(SystemBinding)
+    case stick(StickInput)
+
+    var id: String {
+        switch self {
+        case let .button(button):
+            return "button:\(button.rawValue)"
+        case let .system(binding):
+            return "system:\(binding.rawValue)"
+        case let .stick(input):
+            return "stick:\(input.rawValue)"
         }
     }
+}
 
-    private let onCaptureStarted: () -> Void
+@MainActor
+final class OverlayUIState: ObservableObject {
+    @Published var editTarget: BindingEditTarget?
+    @Published private(set) var isEditing = false
+    @Published var pointerInside = false
 
-    init(onCaptureStarted: @escaping () -> Void) {
-        self.onCaptureStarted = onCaptureStarted
+    private let onEditingChanged: (Bool) -> Void
+
+    init(onEditingChanged: @escaping (Bool) -> Void) {
+        self.onEditingChanged = onEditingChanged
+    }
+
+    func beginEditing() {
+        guard !isEditing else { return }
+        isEditing = true
+        onEditingChanged(true)
+    }
+
+    func edit(_ target: BindingEditTarget) {
+        beginEditing()
+        editTarget = target
+    }
+
+    func dismissEditor() {
+        editTarget = nil
+    }
+
+    func endEditing() {
+        editTarget = nil
+        guard isEditing else { return }
+        isEditing = false
+        onEditingChanged(false)
     }
 }
 
@@ -251,15 +286,23 @@ final class OverlayController {
     init(
         state: ProfileStore,
         visual: ControllerVisualState,
-        onCaptureStarted: @escaping () -> Void
+        onEditingChanged: @escaping (Bool) -> Void
     ) {
         self.state = state
         self.visual = visual
-        uiState = OverlayUIState(onCaptureStarted: onCaptureStarted)
+        uiState = OverlayUIState { editing in
+            if editing {
+                state.beginEditingFocusedApp()
+            } else {
+                state.endEditing()
+            }
+            onEditingChanged(editing)
+        }
     }
 
     var isVisible: Bool { panel?.isVisible == true }
-    var isCapturing: Bool { uiState.captureButton != nil }
+    var isCapturing: Bool { uiState.editTarget != nil }
+    var isEditing: Bool { uiState.isEditing }
 
     func toggle() {
         if isVisible {
@@ -270,7 +313,6 @@ final class OverlayController {
     }
 
     func open() {
-        state.beginEditingFocusedApp()
         if panel == nil { panel = makePanel() }
         guard let panel else { return }
         if panel.isVisible {
@@ -282,12 +324,13 @@ final class OverlayController {
     }
 
     func close() {
+        uiState.endEditing()
         panel?.orderOut(nil)
     }
 
     private func makePanel() -> OverlayPanel {
         let panel = OverlayPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 650),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -305,7 +348,7 @@ final class OverlayController {
                 state: state,
                 visual: visual,
                 uiState: uiState,
-                close: { [weak panel] in panel?.orderOut(nil) }
+                close: { [weak self] in self?.close() }
             )
         )
         return panel
@@ -317,14 +360,14 @@ final class OverlayController {
 struct BindingChip: View {
     let button: PadButton
     let action: BindingAction
-    let inherited: Bool
-    let appDefault: Bool
+    let source: BindingSource
     let pressed: Bool
+    let editable: Bool
     let onTap: () -> Void
 
     var body: some View {
         Button(action: onTap) {
-            VStack(spacing: 2) {
+            VStack(spacing: 1) {
                 Text(button.shortTitle)
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .foregroundStyle(pressed ? .white : .primary)
@@ -333,32 +376,77 @@ struct BindingChip: View {
                     .foregroundStyle(actionColor)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                Text(source.editorLabel)
+                    .font(.system(size: 7, weight: .semibold, design: .rounded))
+                    .foregroundStyle(sourceColor)
+                    .lineLimit(1)
             }
-            .frame(width: 68, height: 34)
+            .frame(width: 78, height: 46)
             .background(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 10)
                     .fill(pressed ? Color.accentColor.opacity(0.55) : Color.white.opacity(0.08))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(borderColor, lineWidth: inherited ? 1 : 1.5)
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(sourceColor.opacity(0.75), lineWidth: source == .operatorOverride ? 1.5 : 1)
             )
         }
         .buttonStyle(.plain)
+        .disabled(!editable)
+        .opacity(editable ? 1 : 0.88)
         .help("Remap \(button.title)")
     }
 
-    private var borderColor: Color {
-        if !inherited { return Color.accentColor.opacity(0.9) }
-        return appDefault ? Color.orange.opacity(0.65) : Color.white.opacity(0.13)
+    private var sourceColor: Color {
+        switch source {
+        case .operatorOverride: return .mint
+        case .preset: return .orange
+        case .globalFallback: return .purple
+        case .builtInDefault: return .blue
+        case .unbound: return .secondary
+        }
     }
 
     private var actionColor: Color {
         switch action {
         case .none: return .secondary
         case .overlay, .switchApp: return .orange
-        case .key, .sequence: return inherited ? (appDefault ? .orange : .purple) : .mint
+        case .key, .sequence: return sourceColor
         }
+    }
+}
+
+struct BindingEditorRow: View {
+    let title: String
+    let action: String
+    let source: BindingSource
+    let editable: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .frame(width: 112, alignment: .leading)
+                Text(action)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(source.editorLabel)
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .foregroundStyle(source == .operatorOverride ? Color.mint : Color.secondary)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(0.07))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(!editable)
+        .opacity(editable ? 1 : 0.88)
     }
 }
 
@@ -483,62 +571,113 @@ struct FaceButtonsGraphic: View {
     }
 }
 
+private extension BindingSource {
+    var editorLabel: String {
+        switch self {
+        case .operatorOverride: return "Operator override"
+        case .preset: return "Preset"
+        case .globalFallback: return "Global fallback"
+        case .builtInDefault: return "Built-in default"
+        case .unbound: return "Unbound"
+        }
+    }
+}
+
+private extension BindingEditorSection {
+    var editorTitle: String {
+        switch self {
+        case .systemBindings: return "System"
+        case .globalFallbacks: return "Global"
+        case .appProfile: return "Focused app"
+        case .herdrLayer: return "Herdr layer"
+        case .stickMappings: return "Sticks"
+        }
+    }
+}
+
+private extension SystemBinding {
+    var editorTitle: String {
+        switch self {
+        case .shortL3: return "Short L3"
+        case .longL3: return "Long L3"
+        case .share: return "Share"
+        }
+    }
+}
+
+private extension StickInput {
+    var editorTitle: String {
+        switch self {
+        case .leftUp: return "Left stick up"
+        case .leftDown: return "Left stick down"
+        case .leftLeft: return "Left stick left"
+        case .leftRight: return "Left stick right"
+        case .rightUp: return "Right stick up"
+        case .rightDown: return "Right stick down"
+        case .rightLeft: return "Right stick left"
+        case .rightRight: return "Right stick right"
+        }
+    }
+}
+
+private extension StickMapping {
+    var displayName: String {
+        switch self {
+        case .none: return "Unbound"
+        case let .key(chord): return chord.displayName
+        case let .scroll(direction): return "Scroll \(direction.rawValue)"
+        }
+    }
+}
+
 struct OverlayView: View {
     @ObservedObject var state: ProfileStore
     @ObservedObject var visual: ControllerVisualState
     @ObservedObject var uiState: OverlayUIState
     let close: () -> Void
 
-    private let topButtons: [PadButton] = [.back, .start, .guide]
-    private let leftButtons: [PadButton] = [.lb, .lt, .l3]
-    private let rightButtons: [PadButton] = [.rb, .rt, .r3]
-    private let dpadButtons: [PadButton] = [.dpadUp, .dpadLeft, .dpadRight, .dpadDown]
-    private let faceButtons: [PadButton] = [.y, .x, .b, .a]
+    private let columns = Array(
+        repeating: GridItem(.flexible(), spacing: 7),
+        count: 5
+    )
 
     var body: some View {
         VStack(spacing: 0) {
             header
             scopeBar
-            controllerArea
+            scopeContent
             footer
         }
-        .padding(16)
-        .frame(width: 520, height: 560)
+        .padding(18)
+        .frame(width: 620, height: 650)
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.ultraThinMaterial)
+                .fill(
+                    uiState.isEditing || uiState.pointerInside
+                        ? AnyShapeStyle(.thinMaterial)
+                        : AnyShapeStyle(.ultraThinMaterial)
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .stroke(Color.white.opacity(0.16), lineWidth: 1)
                 )
         )
         .preferredColorScheme(.dark)
-        .sheet(item: $uiState.captureButton) { button in
-            KeyCaptureSheet(
-                button: button,
-                current: state.binding(for: button),
-                onCapture: { chord in
-                    state.setBinding(.key(chord), for: button)
-                    uiState.captureButton = nil
-                },
-                onClear: {
-                    state.setBinding(.none, for: button)
-                    uiState.captureButton = nil
-                },
-                close: { uiState.captureButton = nil }
-            )
+        .onHover { uiState.pointerInside = $0 }
+        .sheet(item: $uiState.editTarget) { target in
+            editor(for: target)
         }
         .onExitCommand(perform: close)
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Vibestick")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                Text("controller bindings")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                Text(uiState.isEditing ? "bindings editor" : "live bindings trainer")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(uiState.isEditing ? Color.mint : Color.secondary)
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 3) {
@@ -546,8 +685,19 @@ struct OverlayView: View {
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                     .lineLimit(1)
                 Text(state.accessibilityGranted ? "Keyboard output ready" : "Keyboard output needs Access")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
                     .foregroundStyle(state.accessibilityGranted ? .mint : .orange)
+            }
+            if uiState.isEditing {
+                Button("Done") { uiState.endEditing() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("Finish editing and resume mapped controller output")
+            } else {
+                Button("Edit") { uiState.beginEditing() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .help("Pin this app context and suspend mapped controller output")
             }
             Button(action: close) {
                 Image(systemName: "xmark")
@@ -558,100 +708,143 @@ struct OverlayView: View {
             .buttonStyle(.plain)
             .help("Close overlay")
         }
-        .padding(.bottom, 10)
+        .padding(.bottom, 12)
     }
 
     private var scopeBar: some View {
-        VStack(spacing: 6) {
-            Picker("Profile", selection: $state.editingGlobal) {
-                Text("Focused app").tag(false)
-                Text("Global defaults").tag(true)
+        VStack(spacing: 8) {
+            Picker("Editor section", selection: $state.editingSection) {
+                ForEach(state.availableEditingSections) { section in
+                    Text(section.editorTitle).tag(section)
+                }
             }
             .pickerStyle(.segmented)
-            .onChange(of: state.editingGlobal) { _, isGlobal in
-                state.announce(isGlobal ? "Editing global defaults" : "Editing \(state.editingApp.name)'s profile")
+            .onChange(of: state.editingSection) { _, section in
+                state.announce("Viewing \(section.editorTitle.lowercased()) bindings")
             }
-            HStack(spacing: 5) {
+
+            HStack(spacing: 7) {
                 Circle()
-                    .fill(state.editingGlobal ? Color.purple : Color.mint)
-                    .frame(width: 6, height: 6)
-                Text(state.editingGlobal ? "Fallback for every app" : state.describe(state.editingApp))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .fill(uiState.isEditing ? Color.mint : Color.orange)
+                    .frame(width: 7, height: 7)
+                Text(contextDescription)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer()
-                if !state.editingGlobal {
-                    Button("Reset app") { state.resetEditingApp() }
-                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                if uiState.isEditing, state.editingSection == .appProfile {
+                    Button("Reset app profile") { state.resetEditingApp() }
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
                         .buttonStyle(.borderless)
                 }
             }
-            if let presetName = state.appPresetName, !state.editingGlobal {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 5, height: 5)
-                    Text("\(presetName) defaults active · edits save as app overrides")
-                        .font(.system(size: 8, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.orange.opacity(0.9))
-                    Spacer()
-                }
-                if presetName == "Slack" {
-                    Text("Huddle toggle ⌘⇧H · Quick Switcher ⌘K")
-                        .font(.system(size: 8, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
         }
-        .padding(.bottom, 6)
+        .padding(.bottom, 8)
     }
 
-    private var controllerArea: some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 7) {
-                ForEach(topButtons) { button in
-                    chip(button)
+    @ViewBuilder
+    private var scopeContent: some View {
+        switch state.editingSection {
+        case .systemBindings:
+            systemBindings
+        case .globalFallbacks, .appProfile, .herdrLayer:
+            buttonBindings
+        case .stickMappings:
+            stickBindings
+        }
+    }
+
+    private var systemBindings: some View {
+        HStack(spacing: 20) {
+            liveController
+            VStack(spacing: 7) {
+                ForEach(SystemBinding.allCases, id: \.self) { binding in
+                    let override = state.isSystemBindingOverride(binding)
+                    BindingEditorRow(
+                        title: binding.editorTitle,
+                        action: state.systemBinding(for: binding).displayName,
+                        source: override ? .operatorOverride : .builtInDefault,
+                        editable: uiState.isEditing,
+                        onTap: { uiState.edit(.system(binding)) }
+                    )
                 }
             }
-            HStack(spacing: 6) {
-                VStack(spacing: 5) {
-                    ForEach(leftButtons) { button in
-                        chip(button)
-                    }
-                    dpadGrid
-                }
-                ControllerDiagram(
-                    pressed: visual.pressed,
-                    axes: visual.axes,
-                    triggers: visual.triggers
-                )
-                VStack(spacing: 5) {
-                    ForEach(rightButtons) { button in
-                        chip(button)
-                    }
-                    ForEach(faceButtons) { button in
-                        chip(button)
-                    }
-                }
-            }
-            Text("Click any binding box to capture a key or chord")
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .padding(.top, 2)
         }
         .frame(maxHeight: .infinity)
     }
 
-    private var dpadGrid: some View {
-        VStack(spacing: 2) {
-            chip(.dpadUp)
-            HStack(spacing: 2) {
-                chip(.dpadLeft)
-                chip(.dpadRight)
+    private var buttonBindings: some View {
+        VStack(spacing: 4) {
+            liveController
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 7) {
+                    ForEach(editableButtons) { button in
+                        chip(button)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 4)
             }
-            chip(.dpadDown)
+            Text(
+                uiState.isEditing
+                    ? "Select a binding to capture, clear, or reset it"
+                    : "Mappings pass through while you preview live input"
+            )
+            .font(.system(size: 9, weight: .medium, design: .rounded))
+            .foregroundStyle(.secondary)
+            .padding(.top, 2)
         }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var stickBindings: some View {
+        HStack(spacing: 20) {
+            liveController
+            ScrollView {
+                VStack(spacing: 7) {
+                    ForEach(StickInput.allCases, id: \.self) { input in
+                        let override = state.isStickMappingOverride(input)
+                        BindingEditorRow(
+                            title: input.editorTitle,
+                            action: state.stickMapping(for: input).displayName,
+                            source: override ? .operatorOverride : .builtInDefault,
+                            editable: uiState.isEditing,
+                            onTap: { uiState.edit(.stick(input)) }
+                        )
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var liveController: some View {
+        ControllerDiagram(
+            pressed: visual.pressed,
+            axes: visual.axes,
+            triggers: visual.triggers
+        )
+    }
+
+    private var editableButtons: [PadButton] {
+        PadButton.allCases.filter { button in
+            if button == .l3 || button == .share { return false }
+            if state.editingSection == .herdrLayer, button == .back { return false }
+            if state.editingSection == .appProfile,
+               state.editingApp.isHerdr,
+               button == .back {
+                return false
+            }
+            return true
+        }
+    }
+
+    private var contextDescription: String {
+        if uiState.isEditing {
+            return "Pinned to \(state.describe(state.editingApp)) · mapped output suspended"
+        }
+        return "Following \(state.describe(state.editingApp)) · mapped output passes through"
     }
 
     private var footer: some View {
@@ -665,20 +858,20 @@ struct OverlayView: View {
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
                 Spacer()
                 Text(state.status)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             if let configurationNotice = state.configurationNotice {
                 Text(configurationNotice)
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
                     .foregroundStyle(.orange)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .lineLimit(2)
             }
             HStack(spacing: 8) {
-                Text("Hold L3 for app wheel · A opens · B closes")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                Text("Share toggles this overlay · menu bar is always available")
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                 Spacer()
                 if !state.accessibilityGranted {
@@ -698,31 +891,85 @@ struct OverlayView: View {
         BindingChip(
             button: button,
             action: state.binding(for: button),
-            inherited: !state.isOverride(for: button),
-            appDefault: state.isAppDefault(for: button),
+            source: state.bindingSource(for: button),
             pressed: visual.pressed.contains(button),
-            onTap: { uiState.captureButton = button }
+            editable: uiState.isEditing,
+            onTap: { uiState.edit(.button(button)) }
         )
+    }
+
+    @ViewBuilder
+    private func editor(for target: BindingEditTarget) -> some View {
+        switch target {
+        case let .button(button):
+            BindingActionEditorSheet(
+                title: button.title,
+                current: state.binding(for: button),
+                source: state.bindingSource(for: button),
+                onSet: { action in
+                    state.setBinding(action, for: button)
+                    uiState.dismissEditor()
+                },
+                onReset: {
+                    state.resetBinding(button)
+                    uiState.dismissEditor()
+                },
+                close: { uiState.dismissEditor() }
+            )
+        case let .system(binding):
+            BindingActionEditorSheet(
+                title: binding.editorTitle,
+                current: state.systemBinding(for: binding),
+                source: state.isSystemBindingOverride(binding)
+                    ? .operatorOverride
+                    : .builtInDefault,
+                onSet: { action in
+                    state.setSystemBinding(action, for: binding)
+                    uiState.dismissEditor()
+                },
+                onReset: {
+                    state.resetSystemBinding(binding)
+                    uiState.dismissEditor()
+                },
+                close: { uiState.dismissEditor() }
+            )
+        case let .stick(input):
+            StickMappingEditorSheet(
+                input: input,
+                current: state.stickMapping(for: input),
+                source: state.isStickMappingOverride(input)
+                    ? .operatorOverride
+                    : .builtInDefault,
+                onSet: { mapping in
+                    state.setStickMapping(mapping, for: input)
+                    uiState.dismissEditor()
+                },
+                onReset: {
+                    state.resetStickMapping(input)
+                    uiState.dismissEditor()
+                },
+                close: { uiState.dismissEditor() }
+            )
+        }
     }
 }
 
-struct KeyCaptureSheet: View {
-    let button: PadButton
+struct BindingActionEditorSheet: View {
+    let title: String
     let current: BindingAction
-    let onCapture: (KeyChord) -> Void
-    let onClear: () -> Void
+    let source: BindingSource
+    let onSet: (BindingAction) -> Void
+    let onReset: () -> Void
     let close: () -> Void
 
     var body: some View {
         VStack(spacing: 15) {
-            VStack(spacing: 3) {
-                Text("Remap \(button.title)")
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
-                Text("Current: \(current.displayName)")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            KeyCaptureView(onCapture: onCapture)
+            EditorSheetHeader(
+                title: title,
+                current: current.displayName,
+                source: source
+            )
+            KeyCaptureView(onCapture: { onSet(.key($0)) })
                 .frame(height: 64)
                 .overlay(
                     Text("Press any key or modifier chord")
@@ -730,17 +977,105 @@ struct KeyCaptureSheet: View {
                         .foregroundStyle(.secondary)
                         .allowsHitTesting(false)
                 )
-            HStack {
-                Button("Clear binding", action: onClear)
-                    .buttonStyle(.borderless)
-                Spacer()
-                Button("Cancel", action: close)
-                    .keyboardShortcut(.cancelAction)
+            HStack(spacing: 8) {
+                Button("Toggle overlay") { onSet(.overlay) }
+                Button("Open app wheel") { onSet(.switchApp) }
             }
+            .buttonStyle(.bordered)
+            EditorSheetFooter(
+                onClear: { onSet(.none) },
+                onReset: onReset,
+                close: close
+            )
         }
         .padding(22)
-        .frame(width: 320, height: 220)
+        .frame(width: 380, height: 270)
         .preferredColorScheme(.dark)
+    }
+}
+
+struct StickMappingEditorSheet: View {
+    let input: StickInput
+    let current: StickMapping
+    let source: BindingSource
+    let onSet: (StickMapping) -> Void
+    let onReset: () -> Void
+    let close: () -> Void
+
+    var body: some View {
+        VStack(spacing: 15) {
+            EditorSheetHeader(
+                title: input.editorTitle,
+                current: current.displayName,
+                source: source
+            )
+            KeyCaptureView(onCapture: { onSet(.key($0)) })
+                .frame(height: 58)
+                .overlay(
+                    Text("Press a key or choose scrolling")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .allowsHitTesting(false)
+                )
+            HStack(spacing: 7) {
+                ForEach(
+                    [
+                        ScrollDirection.up,
+                        .down,
+                        .left,
+                        .right,
+                    ],
+                    id: \.self
+                ) { direction in
+                    Button(direction.rawValue.capitalized) {
+                        onSet(.scroll(direction))
+                    }
+                }
+            }
+            .buttonStyle(.bordered)
+            EditorSheetFooter(
+                onClear: { onSet(.none) },
+                onReset: onReset,
+                close: close
+            )
+        }
+        .padding(22)
+        .frame(width: 390, height: 255)
+        .preferredColorScheme(.dark)
+    }
+}
+
+private struct EditorSheetHeader: View {
+    let title: String
+    let current: String
+    let source: BindingSource
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("Edit \(title)")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+            Text("\(current) · \(source.editorLabel)")
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct EditorSheetFooter: View {
+    let onClear: () -> Void
+    let onReset: () -> Void
+    let close: () -> Void
+
+    var body: some View {
+        HStack {
+            Button("Clear", action: onClear)
+                .buttonStyle(.borderless)
+            Button("Reset", action: onReset)
+                .buttonStyle(.borderless)
+            Spacer()
+            Button("Cancel", action: close)
+                .keyboardShortcut(.cancelAction)
+        }
     }
 }
 
@@ -792,7 +1127,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         overlay = OverlayController(
             state: state,
             visual: visual,
-            onCaptureStarted: { [weak self] in self?.cancelStickRepeat() }
+            onEditingChanged: { [weak self] editing in
+                self?.applyLifecycle(.setBindingsEditing(editing))
+            }
         )
         appWheel = AppWheelController(
             state: state,
@@ -960,8 +1297,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     @objc private func resetFocusedProfile() {
-        state.beginEditingFocusedApp()
-        state.resetEditingApp()
+        state.resetFocusedApp()
     }
 
     @objc private func quit() {
@@ -1279,9 +1615,13 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         accessibilityStatusMenuItem?.title = state.accessibilityGranted
             ? "Accessibility: granted"
             : "Accessibility: required"
-        outputStatusMenuItem?.title = outputLifecycle.isPaused
-            ? "Output: emergency pause"
-            : "Output: active"
+        outputStatusMenuItem?.title = if outputLifecycle.isPaused {
+            "Output: emergency pause"
+        } else if outputLifecycle.isBindingsEditing {
+            "Output: suspended while editing"
+        } else {
+            "Output: active"
+        }
         appContextStatusMenuItem?.title = "App context: \(state.focusedApp.name)"
         outputMenuItem?.title = outputLifecycle.isPaused
             ? "Resume output"

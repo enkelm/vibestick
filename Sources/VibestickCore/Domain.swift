@@ -534,7 +534,18 @@ public enum BindingSource: Equatable {
     case operatorOverride
     case preset
     case globalFallback
+    case builtInDefault
     case unbound
+}
+
+public enum BindingEditorSection: String, CaseIterable, Equatable, Identifiable {
+    case systemBindings
+    case globalFallbacks
+    case appProfile
+    case herdrLayer
+    case stickMappings
+
+    public var id: String { rawValue }
 }
 
 public struct ResolvedBinding: Equatable {
@@ -828,9 +839,15 @@ public final class ProfileStore: ObservableObject {
     @Published public private(set) var configuration = VibestickConfiguration.defaults
     @Published public private(set) var configurationLoadOutcome: ConfigurationLoadOutcome = .notLoaded
     @Published public private(set) var configurationNotice: String?
-    @Published public var editingGlobal = false
+    @Published public var editingSection: BindingEditorSection = .appProfile
+    @Published public private(set) var isEditingBindings = false
 
     private let storageURL: URL?
+
+    public var editingGlobal: Bool {
+        get { editingSection == .globalFallbacks }
+        set { editingSection = newValue ? .globalFallbacks : .appProfile }
+    }
 
     public init(storageURL: URL? = nil, loadFromDisk: Bool = true) {
         if let storageURL {
@@ -851,30 +868,81 @@ public final class ProfileStore: ObservableObject {
             name: application.localizedName ?? applicationBundleID,
             herdrDetected: HerdrSurfaceDetector.focusedSurfaceIsHerdr()
         )
-        if editingApp.bundleID.isEmpty { editingApp = focusedApp }
+        if !isEditingBindings {
+            editingApp = focusedApp
+            if editingSection == .herdrLayer, !editingApp.isHerdr {
+                editingSection = .appProfile
+            }
+        }
     }
 
     public func beginEditingFocusedApp() {
         editingApp = focusedApp
-        editingGlobal = false
+        if editingSection == .herdrLayer, !editingApp.isHerdr {
+            editingSection = .appProfile
+        }
+        isEditingBindings = true
         announce("Editing \(focusedApp.name)'s app profile")
     }
 
     public func beginEditing(_ app: FocusedApp) {
         editingApp = app
-        editingGlobal = false
+        editingSection = .appProfile
+        isEditingBindings = true
+    }
+
+    public func endEditing() {
+        isEditingBindings = false
+        editingApp = focusedApp
+        if editingSection == .herdrLayer, !editingApp.isHerdr {
+            editingSection = .appProfile
+        }
+    }
+
+    public var availableEditingSections: [BindingEditorSection] {
+        var sections: [BindingEditorSection] = [
+            .systemBindings,
+            .globalFallbacks,
+            .appProfile,
+        ]
+        if editingApp.isHerdr {
+            sections.append(.herdrLayer)
+        }
+        sections.append(.stickMappings)
+        return sections
     }
 
     public var appPresetName: String? {
-        guard !editingGlobal else { return nil }
+        guard editingSection == .appProfile else { return nil }
         return AppPresetCatalog.name(for: editingApp)
     }
 
     public func binding(for button: PadButton) -> BindingAction {
-        if editingGlobal {
+        switch editingSection {
+        case .globalFallbacks:
             return configuration.globalFallbackBindings[button] ?? .none
+        case .herdrLayer:
+            return resolvedHerdrLayerBinding(for: button).action
+        case .appProfile:
+            return resolvedBinding(for: button, app: editingApp).action
+        case .systemBindings, .stickMappings:
+            return .none
         }
-        return resolvedBinding(for: button, app: editingApp).action
+    }
+
+    public func bindingSource(for button: PadButton) -> BindingSource {
+        switch editingSection {
+        case .globalFallbacks:
+            return configuration.globalFallbackBindings[button] == nil
+                ? .unbound
+                : .globalFallback
+        case .herdrLayer:
+            return resolvedHerdrLayerBinding(for: button).source
+        case .appProfile:
+            return resolvedBinding(for: button, app: editingApp).source
+        case .systemBindings, .stickMappings:
+            return .unbound
+        }
     }
 
     public func action(for button: PadButton, app: FocusedApp) -> BindingAction {
@@ -894,23 +962,31 @@ public final class ProfileStore: ObservableObject {
         return ResolvedBinding(action: .none, source: .unbound)
     }
 
+    public func resolvedHerdrLayerBinding(for button: PadButton) -> ResolvedBinding {
+        if let action = configuration.herdrLayerOverrides[button] {
+            return ResolvedBinding(action: action, source: .operatorOverride)
+        }
+        if let action = HerdrLayerPreset.bindings[button] {
+            return ResolvedBinding(action: action, source: .preset)
+        }
+        return ResolvedBinding(action: .none, source: .unbound)
+    }
+
     public func isOverride(for button: PadButton) -> Bool {
-        !editingGlobal &&
-            configuration.appProfiles[editingApp.profileKey.rawValue]?[button] != nil
+        bindingSource(for: button) == .operatorOverride
     }
 
     public func isAppDefault(for button: PadButton) -> Bool {
-        !editingGlobal &&
-            !isOverride(for: button) &&
-            AppPresetCatalog.bindings(for: editingApp)?[button] != nil
+        bindingSource(for: button) == .preset
     }
 
     public func setBinding(_ action: BindingAction, for button: PadButton) {
         guard configurationAllowsChanges() else { return }
-        if editingGlobal {
+        switch editingSection {
+        case .globalFallbacks:
             configuration.globalFallbackBindings[button] = action
             announce("Global · \(button.title) → \(action.displayName)")
-        } else {
+        case .appProfile:
             guard !editingApp.bundleID.isEmpty else {
                 announce("No focused app bundle ID; binding was not saved")
                 return
@@ -920,16 +996,47 @@ public final class ProfileStore: ObservableObject {
             profile[button] = action
             configuration.appProfiles[profileKey] = profile
             announce("\(editingApp.name) · \(button.title) → \(action.displayName)")
+        case .herdrLayer:
+            configuration.herdrLayerOverrides[button] = action
+            announce("Herdr layer · \(button.title) → \(action.displayName)")
+        case .systemBindings, .stickMappings:
+            return
+        }
+        save()
+    }
+
+    public func resetBinding(_ button: PadButton) {
+        guard configurationAllowsChanges() else { return }
+        switch editingSection {
+        case .globalFallbacks:
+            configuration.globalFallbackBindings.removeValue(forKey: button)
+            announce("Reset global \(button.title) fallback")
+        case .appProfile:
+            removeAppOverride(for: button)
+            announce("Reset \(editingApp.name) · \(button.title) to inherited default")
+        case .herdrLayer:
+            configuration.herdrLayerOverrides.removeValue(forKey: button)
+            announce("Reset Herdr layer · \(button.title) to preset")
+        case .systemBindings, .stickMappings:
+            return
         }
         save()
     }
 
     public func resetEditingApp() {
-        guard !editingApp.bundleID.isEmpty else { return }
+        resetAppProfile(for: editingApp)
+    }
+
+    public func resetFocusedApp() {
+        resetAppProfile(for: focusedApp)
+    }
+
+    private func resetAppProfile(for app: FocusedApp) {
+        guard !app.bundleID.isEmpty else { return }
         guard configurationAllowsChanges() else { return }
-        configuration.appProfiles.removeValue(forKey: editingApp.profileKey.rawValue)
+        configuration.appProfiles.removeValue(forKey: app.profileKey.rawValue)
         save()
-        announce("Reset \(editingApp.name) to inherited defaults")
+        announce("Reset \(app.name) to inherited defaults")
     }
 
     public func systemBinding(for binding: SystemBinding) -> BindingAction {
@@ -940,6 +1047,18 @@ public final class ProfileStore: ObservableObject {
         guard configurationAllowsChanges() else { return }
         configuration.systemBindings[binding] = action
         save()
+    }
+
+    public func isSystemBindingOverride(_ binding: SystemBinding) -> Bool {
+        systemBinding(for: binding) != VibestickConfiguration.defaults.systemBindings[binding]
+    }
+
+    public func resetSystemBinding(_ binding: SystemBinding) {
+        guard configurationAllowsChanges() else { return }
+        configuration.systemBindings[binding] =
+            VibestickConfiguration.defaults.systemBindings[binding]
+        save()
+        announce("Reset \(binding.rawValue) to its built-in default")
     }
 
     public func herdrLayerOverride(for button: PadButton) -> BindingAction? {
@@ -975,6 +1094,18 @@ public final class ProfileStore: ObservableObject {
         save()
     }
 
+    public func isStickMappingOverride(_ input: StickInput) -> Bool {
+        stickMapping(for: input) != VibestickConfiguration.defaults.stickMappings[input]
+    }
+
+    public func resetStickMapping(_ input: StickInput) {
+        guard configurationAllowsChanges() else { return }
+        configuration.stickMappings[input] =
+            VibestickConfiguration.defaults.stickMappings[input]
+        save()
+        announce("Reset \(input.rawValue) to its built-in default")
+    }
+
     public func setStickTuning(_ tuning: StickTuning) {
         guard configurationAllowsChanges() else { return }
         configuration.stickTuning = tuning
@@ -995,6 +1126,17 @@ public final class ProfileStore: ObservableObject {
 
     public func describe(_ app: FocusedApp) -> String {
         app.bundleID.isEmpty ? app.name : "\(app.name) · \(app.bundleID)"
+    }
+
+    private func removeAppOverride(for button: PadButton) {
+        let profileKey = editingApp.profileKey.rawValue
+        guard var profile = configuration.appProfiles[profileKey] else { return }
+        profile.removeValue(forKey: button)
+        if profile.isEmpty {
+            configuration.appProfiles.removeValue(forKey: profileKey)
+        } else {
+            configuration.appProfiles[profileKey] = profile
+        }
     }
 
     private func configurationAllowsChanges() -> Bool {

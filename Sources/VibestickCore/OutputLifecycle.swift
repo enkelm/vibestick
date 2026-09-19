@@ -21,6 +21,7 @@ public struct OutputCleanup: OptionSet, Equatable {
 
 public enum OutputLifecycleEvent {
     case setPaused(Bool)
+    case setBindingsEditing(Bool)
     case setTargetControllerConnected(Bool)
     case setAccessibilityGranted(Bool)
     case appContextChanged(FocusedApp)
@@ -31,6 +32,7 @@ public enum OutputLifecycleEvent {
 /// becomes unavailable.
 public struct OutputLifecycle {
     public private(set) var isPaused = false
+    public private(set) var isBindingsEditing = false
     public private(set) var isTerminated = false
     public private(set) var appContext: FocusedApp?
     public private(set) var targetControllerConnected: Bool
@@ -50,6 +52,7 @@ public struct OutputLifecycle {
     public var mappedOutputAvailable: Bool {
         !isTerminated &&
             !isPaused &&
+            !isBindingsEditing &&
             targetControllerConnected &&
             accessibilityGranted
     }
@@ -76,6 +79,17 @@ public struct OutputLifecycle {
     public func allows(_ route: InputRoute) -> Bool {
         guard !isTerminated, targetControllerConnected else { return false }
 
+        if isBindingsEditing {
+            switch route {
+            case .capture:
+                return true
+            case let .systemGesture(_, binding, action):
+                return binding == .share && (action == nil || action == .overlay)
+            case .appWheel, .herdrLayer, .appBinding:
+                return false
+            }
+        }
+
         switch route {
         case .capture, .appWheel:
             return true
@@ -99,6 +113,10 @@ public struct OutputLifecycle {
             guard paused != isPaused else { return [] }
             isPaused = paused
             return paused ? cleanUp(.suspendMappedOutput) : []
+        case let .setBindingsEditing(editing):
+            guard editing != isBindingsEditing else { return [] }
+            isBindingsEditing = editing
+            return cleanUp(.all)
         case let .setTargetControllerConnected(connected):
             guard connected != targetControllerConnected else { return [] }
             targetControllerConnected = connected

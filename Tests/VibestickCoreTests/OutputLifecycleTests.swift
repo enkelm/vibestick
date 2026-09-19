@@ -24,6 +24,70 @@ final class OutputLifecycleTests: XCTestCase {
         XCTAssertTrue(nextLaunch.mappedOutputAvailable)
     }
 
+    func testEditingSuspendsMappedOutputUntilEditingEnds() {
+        var lifecycle = OutputLifecycle(
+            targetControllerConnected: true,
+            accessibilityGranted: true
+        )
+        _ = lifecycle.setHeld(.a, pressed: true)
+
+        XCTAssertEqual(
+            lifecycle.handle(.setBindingsEditing(true)),
+            .all
+        )
+        XCTAssertTrue(lifecycle.isBindingsEditing)
+        XCTAssertFalse(lifecycle.mappedOutputAvailable)
+        XCTAssertFalse(lifecycle.isHeld(.a))
+        XCTAssertEqual(lifecycle.handle(.setBindingsEditing(true)), [])
+
+        _ = lifecycle.setHeld(.l3, pressed: true)
+        XCTAssertEqual(
+            lifecycle.handle(.setBindingsEditing(false)),
+            .all
+        )
+        XCTAssertFalse(lifecycle.isBindingsEditing)
+        XCTAssertFalse(lifecycle.isHeld(.l3))
+        XCTAssertTrue(lifecycle.mappedOutputAvailable)
+    }
+
+    func testEditingAllowsCaptureAndOverlayRecoveryButNoOtherControllerRoute() {
+        var lifecycle = OutputLifecycle(
+            targetControllerConnected: true,
+            accessibilityGranted: true
+        )
+        _ = lifecycle.handle(.setBindingsEditing(true))
+        let ordinary = ControllerInput.button(.a, pressed: true)
+        let share = ControllerInput.button(.share, pressed: true)
+        let l3 = ControllerInput.button(.l3, pressed: true)
+
+        XCTAssertTrue(lifecycle.allows(.capture(ordinary)))
+        XCTAssertTrue(
+            lifecycle.allows(
+                .systemGesture(share, binding: .share, action: .overlay)
+            )
+        )
+        XCTAssertFalse(
+            lifecycle.allows(
+                .systemGesture(
+                    share,
+                    binding: .share,
+                    action: .key(KeyChord(keyCode: 36))
+                )
+            )
+        )
+        XCTAssertFalse(
+            lifecycle.allows(
+                .systemGesture(l3, binding: .longL3, action: .switchApp)
+            )
+        )
+        XCTAssertFalse(lifecycle.allows(.appWheel(ordinary)))
+        XCTAssertFalse(
+            lifecycle.allows(
+                .appBinding(ordinary, action: BindingAction.none)
+            )
+        )
+    }
+
     func testPausePreservesRecoveryRoutesButBlocksMappedRoutes() {
         var lifecycle = OutputLifecycle(
             targetControllerConnected: true,
