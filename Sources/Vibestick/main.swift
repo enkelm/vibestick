@@ -1037,7 +1037,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         InputRoutingContext(
             captureActive: overlay.isCapturing,
             appWheelActive: appWheelSessionActive || appWheel.isVisible,
-            herdrLayerActive: false
+            mappedOutputAvailable: outputLifecycle.mappedOutputAvailable
         )
     }
 
@@ -1045,8 +1045,11 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         guard outputLifecycle.allows(route) else { return }
 
         switch route {
-        case .capture, .herdrLayer:
+        case .capture:
             return
+        case let .herdrLayer(input, action):
+            guard let action else { return }
+            perform(action, from: input)
         case let .appWheel(input):
             handleAppWheelInput(input)
         case let .systemGesture(input, _, action),

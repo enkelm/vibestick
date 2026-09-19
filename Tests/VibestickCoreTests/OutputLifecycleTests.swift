@@ -71,7 +71,7 @@ final class OutputLifecycleTests: XCTestCase {
                 )
             )
         )
-        XCTAssertFalse(lifecycle.allows(.herdrLayer(ordinary)))
+        XCTAssertFalse(lifecycle.allows(.herdrLayer(ordinary, action: nil)))
     }
 
     func testTargetControllerDisconnectCleansUpAndReconnectResumesWithoutAnotherAction() {

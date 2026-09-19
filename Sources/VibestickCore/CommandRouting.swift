@@ -1,22 +1,22 @@
 import Foundation
 
-/// Transient presentation state that participates in input ownership.
+/// Transient application state that participates in input ownership.
 ///
 /// A merely visible bindings overlay is intentionally absent: it observes the
 /// normalized input stream without taking ownership.
 public struct InputRoutingContext: Equatable {
     public let captureActive: Bool
     public let appWheelActive: Bool
-    public let herdrLayerActive: Bool
+    public let mappedOutputAvailable: Bool
 
     public init(
         captureActive: Bool = false,
         appWheelActive: Bool = false,
-        herdrLayerActive: Bool = false
+        mappedOutputAvailable: Bool = true
     ) {
         self.captureActive = captureActive
         self.appWheelActive = appWheelActive
-        self.herdrLayerActive = herdrLayerActive
+        self.mappedOutputAvailable = mappedOutputAvailable
     }
 }
 
@@ -30,7 +30,7 @@ public enum InputRoute: Equatable {
         binding: SystemBinding?,
         action: BindingAction?
     )
-    case herdrLayer(ControllerInput)
+    case herdrLayer(ControllerInput, action: BindingAction?)
     case appBinding(ControllerInput, action: BindingAction?)
 }
 
@@ -44,6 +44,7 @@ public protocol OutputAction {
 @MainActor
 public struct CommandRouter {
     public static let longL3Duration: TimeInterval = 0.65
+    public static let herdrLayerArmDuration: TimeInterval = 2
 
     private enum SystemGestureInput {
         case l3(pressed: Bool)
@@ -56,7 +57,15 @@ public struct CommandRouter {
         case longResolved
     }
 
+    private enum HerdrLayerState {
+        case idle
+        case backHeld(executedAction: Bool)
+        case armed(until: TimeInterval)
+        case cancelling
+    }
+
     private var l3State = L3State.idle
+    private var herdrLayerState = HerdrLayerState.idle
     private var activeTriggers: Set<PadButton> = []
 
     public init() {}
@@ -70,11 +79,11 @@ public struct CommandRouter {
     ) -> InputRoute {
         let activatedButton = updateTriggerState(for: input)
         if context.captureActive {
-            cancelL3IfReleased(input)
+            cancelPendingGesturesIfReleased(input)
             return .capture(input)
         }
         if context.appWheelActive {
-            cancelL3IfReleased(input)
+            cancelPendingGesturesIfReleased(input)
             return .appWheel(input)
         }
         switch Self.systemGesture(for: input) {
@@ -107,8 +116,18 @@ public struct CommandRouter {
         case nil:
             break
         }
-        if context.herdrLayerActive {
-            return .herdrLayer(input)
+        guard context.mappedOutputAvailable else {
+            herdrLayerState = .idle
+            return .appBinding(input, action: nil)
+        }
+        if app.isHerdr,
+           let route = routeHerdrLayer(
+               input,
+               activatedButton: activatedButton,
+               at: timestamp,
+               profile: profile
+           ) {
+            return route
         }
         return .appBinding(
             input,
@@ -140,6 +159,7 @@ public struct CommandRouter {
 
     public mutating func resetTransientState() {
         l3State = .idle
+        herdrLayerState = .idle
         activeTriggers.removeAll()
     }
 
@@ -152,9 +172,17 @@ public struct CommandRouter {
         return profile.action(for: button, app: app)
     }
 
-    private mutating func cancelL3IfReleased(_ input: ControllerInput) {
-        guard case .button(.l3, pressed: false) = input else { return }
-        l3State = .idle
+    private mutating func cancelPendingGesturesIfReleased(
+        _ input: ControllerInput
+    ) {
+        switch input {
+        case .button(.l3, pressed: false):
+            l3State = .idle
+        case .button(.back, pressed: false):
+            herdrLayerState = .idle
+        default:
+            break
+        }
     }
 
     private mutating func updateTriggerState(
@@ -174,6 +202,63 @@ public struct CommandRouter {
             return pressed && !wasPressed ? button : nil
         case .axis:
             return nil
+        }
+    }
+
+    private mutating func routeHerdrLayer(
+        _ input: ControllerInput,
+        activatedButton: PadButton?,
+        at timestamp: TimeInterval,
+        profile: ProfileStore
+    ) -> InputRoute? {
+        if case let .button(.back, pressed) = input {
+            if pressed {
+                if case let .armed(until) = herdrLayerState,
+                   timestamp <= until {
+                    herdrLayerState = .cancelling
+                } else {
+                    herdrLayerState = .backHeld(executedAction: false)
+                }
+            } else if case let .backHeld(executedAction) = herdrLayerState {
+                herdrLayerState = executedAction
+                    ? .idle
+                    : .armed(until: timestamp + Self.herdrLayerArmDuration)
+            } else if case .cancelling = herdrLayerState {
+                herdrLayerState = .idle
+            }
+            return .herdrLayer(input, action: nil)
+        }
+        switch herdrLayerState {
+        case .idle:
+            return nil
+        case .backHeld:
+            guard let button = activatedButton,
+                  let action = profile.herdrLayerAction(for: button)
+            else {
+                return .herdrLayer(input, action: nil)
+            }
+            herdrLayerState = .backHeld(executedAction: true)
+            return .herdrLayer(input, action: action)
+        case let .armed(until):
+            guard timestamp <= until else {
+                herdrLayerState = .idle
+                return nil
+            }
+            guard let button = activatedButton,
+                  let action = profile.herdrLayerAction(for: button)
+            else {
+                return .herdrLayer(input, action: nil)
+            }
+            herdrLayerState = .idle
+            return .herdrLayer(input, action: action)
+        case .cancelling:
+            guard let button = activatedButton,
+                  let action = profile.herdrLayerAction(for: button)
+            else {
+                return .herdrLayer(input, action: nil)
+            }
+            herdrLayerState = .backHeld(executedAction: true)
+            return .herdrLayer(input, action: action)
         }
     }
 

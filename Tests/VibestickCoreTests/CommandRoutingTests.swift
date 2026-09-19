@@ -45,10 +45,7 @@ final class CommandRoutingTests: XCTestCase {
         )
         XCTAssertEqual(
             ProfileStore(storageURL: url).action(for: .a, app: herdr),
-            .sequence([
-                KeyChord(keyCode: 11, modifiers: [.control]),
-                KeyChord(keyCode: 6),
-            ])
+            .key(KeyChord(keyCode: 36))
         )
         XCTAssertEqual(
             ProfileStore(storageURL: url).action(for: .rb, app: herdr),

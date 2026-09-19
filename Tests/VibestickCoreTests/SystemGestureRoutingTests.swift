@@ -13,8 +13,7 @@ final class SystemGestureRoutingTests: XCTestCase {
             input,
             context: InputRoutingContext(
                 captureActive: true,
-                appWheelActive: true,
-                herdrLayerActive: true
+                appWheelActive: true
             ),
             profile: store,
             app: app
@@ -26,16 +25,26 @@ final class SystemGestureRoutingTests: XCTestCase {
     func testShareUsesConfiguredSystemBindingAheadOfHerdrLayer() {
         var router = CommandRouter()
         let store = ProfileStore(loadFromDisk: false)
-        let app = FocusedApp(bundleID: "com.mitchellh.ghostty", name: "Ghostty")
+        let app = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: true
+        )
         let shortcut = BindingAction.key(
             KeyChord(keyCode: 3, modifiers: [.command, .option])
         )
         store.setSystemBinding(shortcut, for: .share)
         let input = ControllerInput.button(.share, pressed: true)
+        _ = router.route(
+            .button(.back, pressed: true),
+            context: .init(),
+            profile: store,
+            app: app
+        )
 
         let route = router.route(
             input,
-            context: InputRoutingContext(herdrLayerActive: true),
+            context: InputRoutingContext(),
             profile: store,
             app: app
         )
@@ -142,17 +151,26 @@ final class SystemGestureRoutingTests: XCTestCase {
     func testOwnershipFallsThroughAppWheelHerdrLayerAndAppBindingInOrder() {
         var router = CommandRouter()
         let store = ProfileStore(loadFromDisk: false)
-        let app = FocusedApp(bundleID: "com.example.target", name: "Target")
-        let appAction = BindingAction.key(KeyChord(keyCode: 36))
-        store.beginEditing(app)
-        store.setBinding(appAction, for: .a)
+        let app = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: true
+        )
+        let appAction = store.action(for: .a, app: app)
+        let layerAction = store.herdrLayerAction(for: .a)
         let share = ControllerInput.button(.share, pressed: true)
         let ordinary = ControllerInput.button(.a, pressed: true)
+        _ = router.route(
+            .button(.back, pressed: true),
+            context: .init(),
+            profile: store,
+            app: app
+        )
 
         XCTAssertEqual(
             router.route(
                 share,
-                context: .init(appWheelActive: true, herdrLayerActive: true),
+                context: .init(appWheelActive: true),
                 profile: store,
                 app: app
             ),
@@ -161,11 +179,17 @@ final class SystemGestureRoutingTests: XCTestCase {
         XCTAssertEqual(
             router.route(
                 ordinary,
-                context: .init(herdrLayerActive: true),
+                context: .init(),
                 profile: store,
                 app: app
             ),
-            .herdrLayer(ordinary)
+            .herdrLayer(ordinary, action: layerAction)
+        )
+        _ = router.route(
+            .button(.back, pressed: false),
+            context: .init(),
+            profile: store,
+            app: app
         )
         XCTAssertEqual(
             router.route(ordinary, context: .init(), profile: store, app: app),
@@ -218,6 +242,44 @@ final class SystemGestureRoutingTests: XCTestCase {
         XCTAssertEqual(
             router.route(released, context: .init(), profile: store, app: app),
             .systemGesture(released, binding: nil, action: nil)
+        )
+    }
+
+    func testHigherPriorityOwnerCancelsHeldBackOnRelease() {
+        var router = CommandRouter()
+        let store = ProfileStore(loadFromDisk: false)
+        let herdr = AppContextClassifier.classify(
+            bundleID: "com.mitchellh.ghostty",
+            name: "Ghostty",
+            herdrDetected: true
+        )
+        let backDown = ControllerInput.button(.back, pressed: true)
+        let backUp = ControllerInput.button(.back, pressed: false)
+        let aDown = ControllerInput.button(.a, pressed: true)
+
+        _ = router.route(
+            backDown,
+            context: .init(),
+            profile: store,
+            app: herdr
+        )
+        XCTAssertEqual(
+            router.route(
+                backUp,
+                context: .init(appWheelActive: true),
+                profile: store,
+                app: herdr
+            ),
+            .appWheel(backUp)
+        )
+        XCTAssertEqual(
+            router.route(
+                aDown,
+                context: .init(),
+                profile: store,
+                app: herdr
+            ),
+            .appBinding(aDown, action: store.action(for: .a, app: herdr))
         )
     }
 

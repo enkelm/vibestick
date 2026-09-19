@@ -547,23 +547,45 @@ public struct ResolvedBinding: Equatable {
     }
 }
 
-public enum HerdrPreset {
-    private static let prefix = KeyChord(keyCode: 11, modifiers: [.control]) // ctrl+b
+private enum HerdrShortcuts {
+    static let prefix = KeyChord(keyCode: 11, modifiers: [.control]) // ctrl+b
+}
 
+public enum HerdrPreset {
     static let bindings: [PadButton: BindingAction] = [
-        .a: .sequence([prefix, KeyChord(keyCode: 6)]), // prefix+z: zoom
-        .b: .sequence([prefix, KeyChord(keyCode: 9)]), // prefix+v: split vertical
-        .x: .sequence([prefix, KeyChord(keyCode: 48)]), // prefix+tab: last pane
-        .y: .sequence([prefix, KeyChord(keyCode: 5)]), // prefix+g: session navigator
-        .lb: .sequence([prefix, KeyChord(keyCode: 35)]), // prefix+p: previous tab
-        .rb: .sequence([prefix, KeyChord(keyCode: 45)]), // prefix+n: next tab
+        .a: .key(KeyChord(keyCode: 36)), // Return
+        .b: .key(KeyChord(keyCode: 49)), // Space
+        .x: .key(KeyChord(keyCode: 53)), // Escape
+        .y: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 5)]), // prefix+g: session navigator
+        .lb: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 35)]), // prefix+p: previous tab
+        .rb: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 45)]), // prefix+n: next tab
         .lt: .key(KeyChord(keyCode: 126, modifiers: [.shift])), // previous agent
         .rt: .key(KeyChord(keyCode: 125, modifiers: [.shift])), // next agent
-        .start: .sequence([prefix, KeyChord(keyCode: 124)]), // prefix+right: next workspace
+        .start: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 124)]), // prefix+right: next workspace
         .dpadLeft: .key(KeyChord(keyCode: 4, modifiers: [.control])), // ctrl+h
-        .dpadDown: .sequence([prefix, KeyChord(keyCode: 38)]), // prefix+j
-        .dpadUp: .sequence([prefix, KeyChord(keyCode: 40)]), // prefix+k
+        .dpadDown: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 38)]), // prefix+j
+        .dpadUp: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 40)]), // prefix+k
         .dpadRight: .key(KeyChord(keyCode: 37, modifiers: [.control])), // ctrl+l
+    ]
+}
+
+public enum HerdrLayerPreset {
+    static let bindings: [PadButton: BindingAction] = [
+        .a: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 6)]), // prefix+z: zoom
+        .b: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 9)]), // prefix+v: split vertical
+        .y: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 27)]), // prefix+minus: split horizontal
+        .x: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 48)]), // prefix+tab: last pane
+        .rb: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 8)]), // prefix+c: new tab
+        .start: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 123)]), // prefix+left: previous workspace
+        .lb: .sequence([
+            HerdrShortcuts.prefix,
+            KeyChord(keyCode: 32, modifiers: [.shift]),
+        ]), // prefix+shift+u: toggle sidebar
+        .rt: .sequence([
+            HerdrShortcuts.prefix,
+            KeyChord(keyCode: 44, modifiers: [.shift]),
+        ]), // prefix+?: help
+        .lt: .sequence([HerdrShortcuts.prefix, KeyChord(keyCode: 1)]), // prefix+s: settings
     ]
 }
 
@@ -918,6 +940,11 @@ public final class ProfileStore: ObservableObject {
 
     public func herdrLayerOverride(for button: PadButton) -> BindingAction? {
         configuration.herdrLayerOverrides[button]
+    }
+
+    public func herdrLayerAction(for button: PadButton) -> BindingAction? {
+        configuration.herdrLayerOverrides[button] ??
+            HerdrLayerPreset.bindings[button]
     }
 
     public func setHerdrLayerOverride(_ action: BindingAction?, for button: PadButton) {
