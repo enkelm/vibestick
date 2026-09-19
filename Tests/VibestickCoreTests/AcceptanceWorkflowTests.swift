@@ -167,7 +167,8 @@ private final class AcceptanceWorkflowFixture {
             #!/bin/zsh
             if [[ "$*" == "rev-parse HEAD" ]]; then
                 print "fixture-commit"
-            elif [[ "$*" == "status --short" && "${DIRTY_SOURCE:-0}" == "1" ]]; then
+            elif [[ "$*" == "status --porcelain=v1 --untracked-files=all" &&
+                    "${DIRTY_SOURCE:-0}" == "1" ]]; then
                 print " M acceptance.sh"
             fi
             """,

@@ -55,7 +55,7 @@ if ! SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null)"; then
     print -u2 "Source is not a Git worktree with an identifiable commit"
     exit 65
 fi
-if ! SOURCE_STATUS="$(git status --short 2>/dev/null)"; then
+if ! SOURCE_STATUS="$(git status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
     print -u2 "Could not inspect the source worktree"
     exit 65
 fi
