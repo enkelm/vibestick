@@ -143,46 +143,14 @@ final class OverlayUIState: ObservableObject {
             }
         }
     }
-
     private let onCaptureStarted: () -> Void
 
     init(onCaptureStarted: @escaping () -> Void) {
         self.onCaptureStarted = onCaptureStarted
     }
-}
 
-
-@MainActor
-final class ControllerVisualState: ObservableObject {
-    @Published private(set) var pressed: Set<PadButton> = []
-    @Published private(set) var triggers: [PadButton: Double] = [:]
-    @Published private(set) var axes: [StickAxis: Double] = [:]
-
-    func apply(_ input: ControllerInput) {
-        switch input {
-        case let .button(button, isPressed):
-            if isPressed {
-                pressed.insert(button)
-            } else {
-                pressed.remove(button)
-            }
-        case let .trigger(button, value):
-            triggers[button] = value
-            if value >= 0.5 {
-                pressed.insert(button)
-            } else {
-                pressed.remove(button)
-            }
-        case let .axis(axis, value):
-            axes[axis] = value
-        }
-        objectWillChange.send()
-    }
-    func clear() {
-        pressed.removeAll()
-        triggers.removeAll()
-        axes.removeAll()
-        objectWillChange.send()
+    func resetInteraction() {
+        captureButton = nil
     }
 }
 
@@ -244,17 +212,17 @@ final class KeyCaptureNSView: NSView {
 @MainActor
 final class OverlayController {
     private let state: ProfileStore
-    private let visual: ControllerVisualState
+    private let trainer: BindingsOverlayTrainer
     private let uiState: OverlayUIState
     private var panel: OverlayPanel?
 
     init(
         state: ProfileStore,
-        visual: ControllerVisualState,
+        trainer: BindingsOverlayTrainer,
         onCaptureStarted: @escaping () -> Void
     ) {
         self.state = state
-        self.visual = visual
+        self.trainer = trainer
         uiState = OverlayUIState(onCaptureStarted: onCaptureStarted)
     }
 
@@ -270,6 +238,7 @@ final class OverlayController {
     }
 
     func open() {
+        trainer.follow(state.focusedApp)
         state.beginEditingFocusedApp()
         if panel == nil { panel = makePanel() }
         guard let panel else { return }
@@ -282,7 +251,15 @@ final class OverlayController {
     }
 
     func close() {
+        uiState.resetInteraction()
+        trainer.setPointerInteraction(active: false)
         panel?.orderOut(nil)
+    }
+
+    func follow(_ app: FocusedApp) {
+        trainer.follow(app)
+        guard isVisible, !isCapturing, !state.editingGlobal else { return }
+        state.beginEditing(app)
     }
 
     private func makePanel() -> OverlayPanel {
@@ -303,9 +280,9 @@ final class OverlayController {
         panel.contentView = NSHostingView(
             rootView: OverlayView(
                 state: state,
-                visual: visual,
+                trainer: trainer,
                 uiState: uiState,
-                close: { [weak panel] in panel?.orderOut(nil) }
+                close: { [weak self] in self?.close() }
             )
         )
         return panel
@@ -359,6 +336,34 @@ struct BindingChip: View {
         case .overlay, .switchApp: return .orange
         case .key, .sequence: return inherited ? (appDefault ? .orange : .purple) : .mint
         }
+    }
+}
+
+struct SystemGestureChip: View {
+    let gesture: String
+    let action: BindingAction
+    let active: Bool
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text(gesture)
+                .font(.system(size: 8, weight: .bold, design: .rounded))
+                .foregroundStyle(active ? .white : .secondary)
+            Text(action.displayName)
+                .font(.system(size: 8, weight: .medium, design: .monospaced))
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+        }
+        .frame(maxWidth: .infinity, minHeight: 30)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(active ? Color.accentColor.opacity(0.55) : Color.white.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.orange.opacity(0.45), lineWidth: 1)
+        )
     }
 }
 
@@ -485,12 +490,12 @@ struct FaceButtonsGraphic: View {
 
 struct OverlayView: View {
     @ObservedObject var state: ProfileStore
-    @ObservedObject var visual: ControllerVisualState
+    @ObservedObject var trainer: BindingsOverlayTrainer
     @ObservedObject var uiState: OverlayUIState
     let close: () -> Void
 
     private let topButtons: [PadButton] = [.back, .start, .guide]
-    private let leftButtons: [PadButton] = [.lb, .lt, .l3]
+    private let leftButtons: [PadButton] = [.lb, .lt]
     private let rightButtons: [PadButton] = [.rb, .rt, .r3]
     private let dpadButtons: [PadButton] = [.dpadUp, .dpadLeft, .dpadRight, .dpadDown]
     private let faceButtons: [PadButton] = [.y, .x, .b, .a]
@@ -499,6 +504,7 @@ struct OverlayView: View {
         VStack(spacing: 0) {
             header
             scopeBar
+            systemGestureBar
             controllerArea
             footer
         }
@@ -507,12 +513,23 @@ struct OverlayView: View {
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(.ultraThinMaterial)
+                .opacity(
+                    trainer.presentation == .interactive ||
+                        uiState.captureButton != nil
+                        ? 0.96
+                        : 0.62
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .stroke(Color.white.opacity(0.16), lineWidth: 1)
                 )
         )
         .preferredColorScheme(.dark)
+        .onHover { active in
+            withAnimation(.easeInOut(duration: 0.16)) {
+                trainer.setPointerInteraction(active: active)
+            }
+        }
         .sheet(item: $uiState.captureButton) { button in
             KeyCaptureSheet(
                 button: button,
@@ -607,6 +624,27 @@ struct OverlayView: View {
         .padding(.bottom, 6)
     }
 
+    private var systemGestureBar: some View {
+        HStack(spacing: 6) {
+            SystemGestureChip(
+                gesture: "SHARE",
+                action: state.systemBinding(for: .share),
+                active: trainer.pressed.contains(.share)
+            )
+            SystemGestureChip(
+                gesture: "L3 TAP",
+                action: state.systemBinding(for: .shortL3),
+                active: trainer.pressed.contains(.l3)
+            )
+            SystemGestureChip(
+                gesture: "L3 HOLD",
+                action: state.systemBinding(for: .longL3),
+                active: trainer.pressed.contains(.l3)
+            )
+        }
+        .padding(.bottom, 6)
+    }
+
     private var controllerArea: some View {
         VStack(spacing: 4) {
             HStack(spacing: 7) {
@@ -622,9 +660,9 @@ struct OverlayView: View {
                     dpadGrid
                 }
                 ControllerDiagram(
-                    pressed: visual.pressed,
-                    axes: visual.axes,
-                    triggers: visual.triggers
+                    pressed: trainer.pressed,
+                    axes: trainer.axes,
+                    triggers: trainer.triggers
                 )
                 VStack(spacing: 5) {
                     ForEach(rightButtons) { button in
@@ -677,7 +715,7 @@ struct OverlayView: View {
                     .lineLimit(2)
             }
             HStack(spacing: 8) {
-                Text("Hold L3 for app wheel · A opens · B closes")
+                Text("Trainer is live · Share closes · other controls pass through")
                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -695,12 +733,15 @@ struct OverlayView: View {
     }
 
     private func chip(_ button: PadButton) -> some View {
-        BindingChip(
+        let action = state.editingGlobal
+            ? state.binding(for: button)
+            : trainer.resolvedBinding(for: button, profile: state).action
+        return BindingChip(
             button: button,
-            action: state.binding(for: button),
+            action: action,
             inherited: !state.isOverride(for: button),
             appDefault: state.isAppDefault(for: button),
-            pressed: visual.pressed.contains(button),
+            pressed: trainer.pressed.contains(button),
             onTap: { uiState.captureButton = button }
         )
     }
@@ -760,7 +801,7 @@ private enum AccessibilityOnboarding {
 @MainActor
 final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let state = ProfileStore()
-    let visual = ControllerVisualState()
+    let trainer = BindingsOverlayTrainer()
     private var reader: ControllerReader!
     private var actions: MacActions!
     private var overlay: OverlayController!
@@ -791,7 +832,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         stickRepeater = StickRepeater(tuning: state.configuration.stickTuning)
         overlay = OverlayController(
             state: state,
-            visual: visual,
+            trainer: trainer,
             onCaptureStarted: { [weak self] in self?.cancelStickRepeat() }
         )
         appWheel = AppWheelController(
@@ -902,7 +943,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     @objc private func openOverlay() {
-        overlay.toggle()
+        overlay.open()
     }
 
     @objc private func toggleAppWheel() {
@@ -1008,7 +1049,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         // Reclassify before tracking every fresh input so a context change
         // cleans up the old context before even a system gesture is accepted.
         refreshFocus()
-        visual.apply(input)
+        trainer.observe(input)
         switch input {
         case let .button(button, pressed):
             handleButton(button, pressed: pressed)
@@ -1197,8 +1238,8 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         case let .axis(axis, _):
             guard axis == .leftX || axis == .leftY else { return }
             appWheel.updateSelection(
-                x: visual.axes[.leftX] ?? 0,
-                y: visual.axes[.leftY] ?? 0
+                x: trainer.axes[.leftX] ?? 0,
+                y: trainer.axes[.leftY] ?? 0
             )
         case .trigger:
             return
@@ -1232,6 +1273,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
 
     private func refreshFocus() {
         state.refreshFocus()
+        overlay?.follow(state.focusedApp)
         applyLifecycle(.appContextChanged(state.focusedApp))
     }
 
@@ -1254,7 +1296,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     ) {
         applyCleanup(outputLifecycle.handle(event))
         if clearVisualization {
-            visual.clear()
+            trainer.clearController()
         }
         refreshMenuStatus()
     }

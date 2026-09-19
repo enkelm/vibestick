@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Complete the explicit app wheel; 10: Add repeatable stick navigation and scrolling.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] Share toggles the overlay and is the only controller input consumed by a merely visible overlay.
 - [ ] Buttons, sticks, scrolling, and the app wheel continue to work while the training overlay is visible.
