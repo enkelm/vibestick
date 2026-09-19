@@ -4,6 +4,14 @@ public enum SystemBinding: String, CaseIterable, Codable, Hashable {
     case shortL3 = "short_l3"
     case longL3 = "long_l3"
     case share
+
+    public var title: String {
+        switch self {
+        case .shortL3: return "L3 tap"
+        case .longL3: return "L3 hold"
+        case .share: return "Share"
+        }
+    }
 }
 
 public enum StickInput: String, CaseIterable, Codable, Hashable {

@@ -257,8 +257,9 @@ final class OverlayController {
     }
 
     func follow(_ app: FocusedApp) {
+        guard !isCapturing else { return }
         trainer.follow(app)
-        guard isVisible, !isCapturing, !state.editingGlobal else { return }
+        guard isVisible, !state.editingGlobal else { return }
         state.beginEditing(app)
     }
 
@@ -340,13 +341,13 @@ struct BindingChip: View {
 }
 
 struct SystemGestureChip: View {
-    let gesture: String
+    let binding: SystemBinding
     let action: BindingAction
     let active: Bool
 
     var body: some View {
         VStack(spacing: 2) {
-            Text(gesture)
+            Text(binding.title.uppercased())
                 .font(.system(size: 8, weight: .bold, design: .rounded))
                 .foregroundStyle(active ? .white : .secondary)
             Text(action.displayName)
@@ -627,17 +628,17 @@ struct OverlayView: View {
     private var systemGestureBar: some View {
         HStack(spacing: 6) {
             SystemGestureChip(
-                gesture: "SHARE",
+                binding: .share,
                 action: state.systemBinding(for: .share),
                 active: trainer.pressed.contains(.share)
             )
             SystemGestureChip(
-                gesture: "L3 TAP",
+                binding: .shortL3,
                 action: state.systemBinding(for: .shortL3),
                 active: trainer.pressed.contains(.l3)
             )
             SystemGestureChip(
-                gesture: "L3 HOLD",
+                binding: .longL3,
                 action: state.systemBinding(for: .longL3),
                 active: trainer.pressed.contains(.l3)
             )
