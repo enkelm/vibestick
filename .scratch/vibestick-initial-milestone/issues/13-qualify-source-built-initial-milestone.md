@@ -19,8 +19,7 @@
 The repeatable automated workflow is implemented by `acceptance.sh` and
 documented in `docs/initial-milestone-acceptance.md`. A qualification run
 completed successfully with all 82 tests passing and a release
-`Vibestick.app` built from source. Its local evidence is under
-`.scratch/acceptance/20260919T143608Z-18685/`.
+`Vibestick.app` built from source.
 
 The generated `manual-checklist.md` covers every physical and lifecycle check
 above, including operator confirmation that Herdr's gamepad plugin is disabled

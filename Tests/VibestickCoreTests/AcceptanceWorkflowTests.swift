@@ -51,6 +51,28 @@ final class AcceptanceWorkflowTests: XCTestCase {
             "outcome=FAIL\nexit_code=23\n"
         )
     }
+
+    func testWorkflowRejectsSourceThatCannotBeIdentifiedByItsCommit() throws {
+        let fixture = try AcceptanceWorkflowFixture()
+        defer { fixture.remove() }
+        let evidenceURL = fixture.root.appendingPathComponent("evidence")
+
+        let process = try fixture.run(
+            evidenceURL: evidenceURL,
+            environment: ["DIRTY_SOURCE": "1"]
+        )
+
+        XCTAssertEqual(process.terminationStatus, 65)
+        XCTAssertEqual(try fixture.invocations(), ["--version"])
+        XCTAssertEqual(
+            try String(contentsOf: evidenceURL.appendingPathComponent("result.txt")),
+            "outcome=FAIL\nexit_code=65\n"
+        )
+        let log = try String(
+            contentsOf: evidenceURL.appendingPathComponent("workflow.log")
+        )
+        XCTAssertTrue(log.contains("Source tree is not clean"))
+    }
 }
 
 private final class AcceptanceWorkflowFixture {
@@ -66,10 +88,9 @@ private final class AcceptanceWorkflowFixture {
             .appendingPathComponent("VibestickAcceptanceTests-\(UUID().uuidString)")
         try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
 
-        let projectRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
+        let projectRoot = try Self.locateProjectRoot(
+            from: URL(fileURLWithPath: #filePath)
+        )
         try fileManager.copyItem(
             at: projectRoot.appendingPathComponent("acceptance.sh"),
             to: root.appendingPathComponent("acceptance.sh")
@@ -144,6 +165,17 @@ private final class AcceptanceWorkflowFixture {
         try writeExecutable(
             """
             #!/bin/zsh
+            if [[ "$*" == "rev-parse HEAD" ]]; then
+                print "fixture-commit"
+            elif [[ "$*" == "status --short" && "${DIRTY_SOURCE:-0}" == "1" ]]; then
+                print " M acceptance.sh"
+            fi
+            """,
+            to: bin.appendingPathComponent("git")
+        )
+        try writeExecutable(
+            """
+            #!/bin/zsh
             print -r -- "build" >> "$ACCEPTANCE_INVOCATIONS"
             mkdir -p "$PWD/Vibestick.app/Contents/MacOS"
             touch "$PWD/Vibestick.app/Contents/MacOS/Vibestick"
@@ -158,6 +190,21 @@ private final class AcceptanceWorkflowFixture {
         try fileManager.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: url.path
+        )
+    }
+
+    private static func locateProjectRoot(from fileURL: URL) throws -> URL {
+        var candidate = fileURL.deletingLastPathComponent()
+        while candidate.path != "/" {
+            let manifest = candidate.appendingPathComponent("Package.swift")
+            if FileManager.default.fileExists(atPath: manifest.path) {
+                return candidate
+            }
+            candidate.deleteLastPathComponent()
+        }
+        throw CocoaError(
+            .fileNoSuchFile,
+            userInfo: [NSFilePathErrorKey: "Package.swift"]
         )
     }
 }

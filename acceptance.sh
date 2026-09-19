@@ -51,12 +51,21 @@ print "Started: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 print "Source: $ROOT"
 print "Evidence: $EVIDENCE_DIRECTORY"
 
+if ! SOURCE_COMMIT="$(git rev-parse HEAD 2>/dev/null)"; then
+    print -u2 "Source is not a Git worktree with an identifiable commit"
+    exit 65
+fi
+if ! SOURCE_STATUS="$(git status --short 2>/dev/null)"; then
+    print -u2 "Could not inspect the source worktree"
+    exit 65
+fi
+
 {
     print "timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     print "source=$ROOT"
-    print "git_commit=$(git rev-parse HEAD 2>/dev/null || print unavailable)"
+    print "git_commit=$SOURCE_COMMIT"
     print "git_status_begin"
-    git status --short 2>/dev/null || print "unavailable"
+    print -r -- "$SOURCE_STATUS"
     print "git_status_end"
     print "macos=$(sw_vers -productVersion 2>/dev/null || print unavailable)"
     print "architecture=$(uname -m)"
@@ -68,6 +77,12 @@ print "Evidence: $EVIDENCE_DIRECTORY"
 cp \
     "$ROOT/docs/initial-milestone-acceptance-checklist.md" \
     "$EVIDENCE_DIRECTORY/manual-checklist.md"
+
+if [[ -n "$SOURCE_STATUS" ]]; then
+    print -u2 "Source tree is not clean; commit or remove all changes before acceptance"
+    print -r -- "$SOURCE_STATUS"
+    exit 65
+fi
 
 print
 print "== Clean source tree =="

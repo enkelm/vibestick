@@ -31,6 +31,11 @@ From the repository root:
 ./acceptance.sh
 ```
 
+The source worktree must be clean. The workflow refuses to qualify tracked,
+staged, or untracked changes so that the recorded commit identifies the exact
+source under test. Ignored build products and acceptance evidence do not affect
+this check.
+
 The command creates a unique run directory under `.scratch/acceptance/` and
 prints its path. To choose an evidence directory instead:
 
