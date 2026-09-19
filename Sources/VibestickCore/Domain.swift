@@ -579,16 +579,20 @@ public enum SlackPreset {
     /// separate mapping; the editor still lets the user put it anywhere.
     static let bindings: [PadButton: BindingAction] = [
         .a: .key(KeyChord(keyCode: 4, modifiers: [.command, .shift])), // huddle toggle
-        .b: .key(KeyChord(keyCode: 53)), // mark current conversation read
+        .b: .key(KeyChord(keyCode: 53)), // mark read or dismiss
         .x: .key(KeyChord(keyCode: 40, modifiers: [.command])), // quick switcher
         .y: .key(KeyChord(keyCode: 45, modifiers: [.command])), // compose
-        .lb: .key(KeyChord(keyCode: 0, modifiers: [.command, .shift])), // all unreads
-        .rb: .key(KeyChord(keyCode: 5, modifiers: [.command])), // search
-        .lt: .key(KeyChord(keyCode: 3, modifiers: [.command])), // find
-        .rt: .key(KeyChord(keyCode: 44, modifiers: [.command])), // shortcut list
-        .l3: .key(KeyChord(keyCode: 125, modifiers: [.option, .shift])), // next unread
-        .r3: .key(KeyChord(keyCode: 126, modifiers: [.option, .shift])), // previous unread
-        .dpadUp: .key(KeyChord(keyCode: 38, modifiers: [.command])), // latest unread
+        .lb: .key(KeyChord(keyCode: 126, modifiers: [.option, .shift])), // previous unread
+        .rb: .key(KeyChord(keyCode: 125, modifiers: [.option, .shift])), // next unread
+        .lt: .key(KeyChord(keyCode: 0, modifiers: [.command, .shift])), // all unreads
+        .rt: .key(KeyChord(keyCode: 5, modifiers: [.command])), // search
+        .r3: .key(KeyChord(keyCode: 49, modifiers: [.command, .shift])), // huddle mute
+        .dpadUp: .key(KeyChord(keyCode: 126, modifiers: [.option])), // previous conversation
+        .dpadDown: .key(KeyChord(keyCode: 125, modifiers: [.option])), // next conversation
+        .dpadLeft: .key(KeyChord(keyCode: 33, modifiers: [.command])), // back
+        .dpadRight: .key(KeyChord(keyCode: 30, modifiers: [.command])), // forward
+        .back: .key(KeyChord(keyCode: 18, modifiers: [.control])), // Home
+        .start: .key(KeyChord(keyCode: 46, modifiers: [.command, .shift])), // Activity
     ]
 }
 
