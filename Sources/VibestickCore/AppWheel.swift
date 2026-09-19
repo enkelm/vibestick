@@ -2,13 +2,13 @@ import Foundation
 
 /// A platform-neutral snapshot of one running application.
 ///
-/// `id` identifies the running instance. `bundleID` identifies the app for
+/// `id` identifies the running instance. `applicationID` identifies the app for
 /// deduplication and recent-use tracking.
 public struct AppWheelApplication: Equatable {
     public let id: String
     public let name: String
-    public let bundleID: String
-    public let recentUse: UInt64?
+    public let applicationID: String
+    public let recencyRank: UInt64?
     public let isRegular: Bool
     public let isTerminated: Bool
     public let isCurrent: Bool
@@ -17,8 +17,8 @@ public struct AppWheelApplication: Equatable {
     public init(
         id: String,
         name: String,
-        bundleID: String,
-        recentUse: UInt64? = nil,
+        applicationID: String,
+        recencyRank: UInt64? = nil,
         isRegular: Bool = true,
         isTerminated: Bool = false,
         isCurrent: Bool = false,
@@ -26,8 +26,8 @@ public struct AppWheelApplication: Equatable {
     ) {
         self.id = id
         self.name = name
-        self.bundleID = bundleID
-        self.recentUse = recentUse
+        self.applicationID = applicationID
+        self.recencyRank = recencyRank
         self.isRegular = isRegular
         self.isTerminated = isTerminated
         self.isCurrent = isCurrent
@@ -41,22 +41,22 @@ public enum AppWheelCandidates {
     public static func make(
         from applications: [AppWheelApplication]
     ) -> [AppWheelApplication] {
-        let excludedBundleIDs = Set(
+        let excludedApplicationIDs = Set(
             applications
                 .filter { $0.isCurrent || $0.isVibestick }
-                .map(\.bundleID)
+                .map(\.applicationID)
         )
         let ordered = applications
             .filter {
                 $0.isRegular &&
                     !$0.isTerminated &&
-                    !excludedBundleIDs.contains($0.bundleID)
+                    !excludedApplicationIDs.contains($0.applicationID)
             }
             .sorted(by: comesBefore)
 
-        var seenBundleIDs: Set<String> = []
+        var seenApplicationIDs: Set<String> = []
         return ordered
-            .filter { seenBundleIDs.insert($0.bundleID).inserted }
+            .filter { seenApplicationIDs.insert($0.applicationID).inserted }
             .prefix(limit)
             .map { $0 }
     }
@@ -65,7 +65,7 @@ public enum AppWheelCandidates {
         _ lhs: AppWheelApplication,
         _ rhs: AppWheelApplication
     ) -> Bool {
-        switch (lhs.recentUse, rhs.recentUse) {
+        switch (lhs.recencyRank, rhs.recencyRank) {
         case let (left?, right?) where left != right:
             return left > right
         case (_?, nil):
@@ -80,10 +80,34 @@ public enum AppWheelCandidates {
         if nameOrder != .orderedSame {
             return nameOrder == .orderedAscending
         }
-        if lhs.bundleID != rhs.bundleID {
-            return lhs.bundleID < rhs.bundleID
+        if lhs.applicationID != rhs.applicationID {
+            return lhs.applicationID < rhs.applicationID
         }
         return lhs.id < rhs.id
+    }
+}
+
+public enum AppWheelApplicationIdentity {
+    public static func make(
+        bundleIdentifier: String?,
+        bundleURL: URL?,
+        executableURL: URL?,
+        localizedName: String?,
+        processIdentifier: Int32
+    ) -> String {
+        if let bundleIdentifier, !bundleIdentifier.isEmpty {
+            return "bundle-id:\(bundleIdentifier)"
+        }
+        if let bundleURL {
+            return "bundle-url:\(bundleURL.standardizedFileURL.path)"
+        }
+        if let executableURL {
+            return "executable-url:\(executableURL.standardizedFileURL.path)"
+        }
+        if let localizedName, !localizedName.isEmpty {
+            return "localized-name:\(localizedName)"
+        }
+        return "pid:\(processIdentifier)"
     }
 }
 
@@ -94,13 +118,13 @@ public struct AppWheelRecency {
 
     public init() {}
 
-    public mutating func recordUse(of bundleID: String) {
-        ranks[bundleID] = nextRank
+    public mutating func recordUse(of applicationID: String) {
+        ranks[applicationID] = nextRank
         nextRank &+= 1
     }
 
-    public func rank(for bundleID: String) -> UInt64? {
-        ranks[bundleID]
+    public func rank(for applicationID: String) -> UInt64? {
+        ranks[applicationID]
     }
 }
 

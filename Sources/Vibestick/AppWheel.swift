@@ -50,18 +50,18 @@ final class AppWheelController {
 
     private let state: ProfileStore
     private let appActivated: () -> Void
-    private let recentUse: (String) -> UInt64?
+    private let recencyRank: (String) -> UInt64?
     private let model = AppWheelModel()
     private var panel: AppWheelPanel?
 
     init(
         state: ProfileStore,
         appActivated: @escaping () -> Void,
-        recentUse: @escaping (String) -> UInt64?
+        recencyRank: @escaping (String) -> UInt64?
     ) {
         self.state = state
         self.appActivated = appActivated
-        self.recentUse = recentUse
+        self.recencyRank = recencyRank
     }
 
     var isVisible: Bool { panel?.isVisible == true }
@@ -161,12 +161,12 @@ final class AppWheelController {
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let applications = workspace.runningApplications
         let snapshots = applications.map { application in
-            let bundleID = appWheelIdentifier(for: application)
+            let applicationID = appWheelIdentifier(for: application)
             return AppWheelApplication(
                 id: String(application.processIdentifier),
-                name: application.localizedName ?? bundleID,
-                bundleID: bundleID,
-                recentUse: recentUse(bundleID),
+                name: application.localizedName ?? applicationID,
+                applicationID: applicationID,
+                recencyRank: recencyRank(applicationID),
                 isRegular: application.activationPolicy == .regular,
                 isTerminated: application.isTerminated,
                 isCurrent: application.processIdentifier == frontmostPID,
@@ -200,7 +200,13 @@ final class AppWheelController {
 }
 
 func appWheelIdentifier(for application: NSRunningApplication) -> String {
-    application.bundleIdentifier ?? "pid.\(application.processIdentifier)"
+    AppWheelApplicationIdentity.make(
+        bundleIdentifier: application.bundleIdentifier,
+        bundleURL: application.bundleURL,
+        executableURL: application.executableURL,
+        localizedName: application.localizedName,
+        processIdentifier: application.processIdentifier
+    )
 }
 
 // MARK: - App wheel UI

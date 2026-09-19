@@ -734,8 +734,8 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         appWheel = AppWheelController(
             state: state,
             appActivated: { [weak self] in self?.scheduleFocusRefresh() },
-            recentUse: { [weak self] bundleID in
-                self?.appWheelRecency.rank(for: bundleID)
+            recencyRank: { [weak self] applicationID in
+                self?.appWheelRecency.rank(for: applicationID)
             }
         )
         recordUse(of: NSWorkspace.shared.frontmostApplication)

@@ -4,36 +4,36 @@ import XCTest
 final class AppWheelTests: XCTestCase {
     func testCandidatesExcludeCurrentAndVibestickDeduplicateAndLimitToEight() {
         let applications = [
-            application("current", name: "Current", bundleID: "app.current", isCurrent: true),
-            application("current-copy", name: "Current Copy", bundleID: "app.current"),
-            application("vibestick", name: "Vibestick", bundleID: "app.vibestick", isVibestick: true),
-            application("vibestick-copy", name: "Vibestick Copy", bundleID: "app.vibestick"),
-            application("accessory", name: "Accessory", bundleID: "app.accessory", isRegular: false),
-            application("terminated", name: "Terminated", bundleID: "app.terminated", isTerminated: true),
-            application("duplicate-old", name: "Duplicate", bundleID: "app.duplicate", recentUse: 1),
-            application("duplicate-new", name: "Duplicate", bundleID: "app.duplicate", recentUse: 20),
+            application("current", name: "Current", applicationID: "app.current", isCurrent: true),
+            application("current-copy", name: "Current Copy", applicationID: "app.current"),
+            application("vibestick", name: "Vibestick", applicationID: "app.vibestick", isVibestick: true),
+            application("vibestick-copy", name: "Vibestick Copy", applicationID: "app.vibestick"),
+            application("accessory", name: "Accessory", applicationID: "app.accessory", isRegular: false),
+            application("terminated", name: "Terminated", applicationID: "app.terminated", isTerminated: true),
+            application("duplicate-old", name: "Duplicate", applicationID: "app.duplicate", recencyRank: 1),
+            application("duplicate-new", name: "Duplicate", applicationID: "app.duplicate", recencyRank: 20),
         ] + (0..<10).map {
-            application("app-\($0)", name: "App \($0)", bundleID: "app.\($0)", recentUse: UInt64(10 - $0))
+            application("app-\($0)", name: "App \($0)", applicationID: "app.\($0)", recencyRank: UInt64(10 - $0))
         }
 
         let candidates = AppWheelCandidates.make(from: applications)
 
         XCTAssertEqual(candidates.count, 8)
         XCTAssertEqual(candidates.first?.id, "duplicate-new")
-        XCTAssertEqual(Set(candidates.map(\.bundleID)).count, candidates.count)
-        XCTAssertFalse(candidates.contains { $0.bundleID == "app.current" })
-        XCTAssertFalse(candidates.contains { $0.bundleID == "app.vibestick" })
-        XCTAssertFalse(candidates.contains { $0.bundleID == "app.accessory" })
-        XCTAssertFalse(candidates.contains { $0.bundleID == "app.terminated" })
+        XCTAssertEqual(Set(candidates.map(\.applicationID)).count, candidates.count)
+        XCTAssertFalse(candidates.contains { $0.applicationID == "app.current" })
+        XCTAssertFalse(candidates.contains { $0.applicationID == "app.vibestick" })
+        XCTAssertFalse(candidates.contains { $0.applicationID == "app.accessory" })
+        XCTAssertFalse(candidates.contains { $0.applicationID == "app.terminated" })
     }
 
     func testCandidatesUseMostRecentUseThenAlphabeticalFallback() {
         let applications = [
-            application("unknown-z", name: "Zulu", bundleID: "app.zulu"),
-            application("older", name: "Beta", bundleID: "app.beta", recentUse: 3),
-            application("unknown-a", name: "Alpha", bundleID: "app.alpha"),
-            application("newer-z", name: "Zulu Recent", bundleID: "app.zulu-recent", recentUse: 8),
-            application("newer-a", name: "Alpha Recent", bundleID: "app.alpha-recent", recentUse: 8),
+            application("unknown-z", name: "Zulu", applicationID: "app.zulu"),
+            application("older", name: "Beta", applicationID: "app.beta", recencyRank: 3),
+            application("unknown-a", name: "Alpha", applicationID: "app.alpha"),
+            application("newer-z", name: "Zulu Recent", applicationID: "app.zulu-recent", recencyRank: 8),
+            application("newer-a", name: "Alpha Recent", applicationID: "app.alpha-recent", recencyRank: 8),
         ]
 
         XCTAssertEqual(
@@ -54,6 +54,28 @@ final class AppWheelTests: XCTestCase {
         XCTAssertEqual(recency.rank(for: "app.beta"), 2)
         XCTAssertEqual(recency.rank(for: "app.alpha"), 3)
         XCTAssertNil(recency.rank(for: "app.unknown"))
+    }
+
+    func testApplicationIdentityFallsBackToStableAppMetadataBeforeProcessID() {
+        let bundleURL = URL(fileURLWithPath: "/Applications/Example.app")
+        let executableURL = bundleURL.appendingPathComponent("Contents/MacOS/Example")
+
+        XCTAssertEqual(
+            AppWheelApplicationIdentity.make(
+                bundleIdentifier: nil,
+                bundleURL: bundleURL,
+                executableURL: executableURL,
+                localizedName: "Example",
+                processIdentifier: 10
+            ),
+            AppWheelApplicationIdentity.make(
+                bundleIdentifier: nil,
+                bundleURL: bundleURL,
+                executableURL: executableURL,
+                localizedName: "Example",
+                processIdentifier: 20
+            )
+        )
     }
 
     func testWheelBeginsWithoutSelectionAndRetainsSelectionInDeadZone() {
@@ -124,8 +146,8 @@ final class AppWheelTests: XCTestCase {
     private func application(
         _ id: String,
         name: String,
-        bundleID: String,
-        recentUse: UInt64? = nil,
+        applicationID: String,
+        recencyRank: UInt64? = nil,
         isRegular: Bool = true,
         isTerminated: Bool = false,
         isCurrent: Bool = false,
@@ -134,8 +156,8 @@ final class AppWheelTests: XCTestCase {
         AppWheelApplication(
             id: id,
             name: name,
-            bundleID: bundleID,
-            recentUse: recentUse,
+            applicationID: applicationID,
+            recencyRank: recencyRank,
             isRegular: isRegular,
             isTerminated: isTerminated,
             isCurrent: isCurrent,
