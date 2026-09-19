@@ -6,6 +6,7 @@ Package.resolved
 # Generated application bundle and release artifacts
 Vibestick.app/
 *.dSYM/
+.scratch/acceptance/
 
 # Xcode / Swift tooling
 DerivedData/
