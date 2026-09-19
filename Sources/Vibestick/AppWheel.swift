@@ -5,32 +5,37 @@ import VibestickCore
 struct AppWheelItem: Identifiable {
     let id: pid_t
     let name: String
-    let bundleID: String
     let icon: NSImage
     let application: NSRunningApplication
-    let isFrontmost: Bool
 }
 
 @MainActor
 final class AppWheelModel: ObservableObject {
     @Published private(set) var apps: [AppWheelItem] = []
-    @Published private(set) var selectedIndex: Int?
+    @Published private(set) var interaction = AppWheelInteraction()
+
+    var selectedIndex: Int? {
+        interaction.selectedIndex
+    }
 
     var selectedApp: AppWheelItem? {
-        guard let selectedIndex, apps.indices.contains(selectedIndex) else { return nil }
+        guard let selectedIndex,
+              apps.indices.contains(selectedIndex)
+        else { return nil }
         return apps[selectedIndex]
     }
 
     func replaceApps(_ apps: [AppWheelItem]) {
         self.apps = apps
-        selectedIndex = nil
+        interaction.begin(itemCount: apps.count)
     }
 
     func updateSelection(x: Double, y: Double) {
-        guard let index = RadialSelection.index(x: x, y: y, itemCount: apps.count) else {
-            return
-        }
-        selectedIndex = index
+        interaction.updateSelection(x: x, y: y)
+    }
+
+    func handle(button: PadButton, pressed: Bool) -> AppWheelResponse {
+        interaction.handle(button: button, pressed: pressed)
     }
 }
 
@@ -45,12 +50,18 @@ final class AppWheelController {
 
     private let state: ProfileStore
     private let appActivated: () -> Void
+    private let recentUse: (String) -> UInt64?
     private let model = AppWheelModel()
     private var panel: AppWheelPanel?
 
-    init(state: ProfileStore, appActivated: @escaping () -> Void) {
+    init(
+        state: ProfileStore,
+        appActivated: @escaping () -> Void,
+        recentUse: @escaping (String) -> UInt64?
+    ) {
         self.state = state
         self.appActivated = appActivated
+        self.recentUse = recentUse
     }
 
     var isVisible: Bool { panel?.isVisible == true }
@@ -77,19 +88,17 @@ final class AppWheelController {
         model.updateSelection(x: x, y: y)
     }
 
-    func confirmSelection() {
+    func handle(button: PadButton, pressed: Bool) {
         guard isVisible else { return }
-        guard let item = model.selectedApp else {
-            state.announce("Point the left stick at an app before pressing A")
-            return
-        }
-
-        close()
-        if item.application.activate(options: [.activateAllWindows]) {
-            state.announce("Opened \(item.name)")
-            appActivated()
-        } else {
-            state.announce("macOS could not open \(item.name)")
+        switch model.handle(button: button, pressed: pressed) {
+        case .none:
+            if button == .a, pressed, model.selectedApp == nil {
+                state.announce("Point the left stick at an app before pressing A")
+            }
+        case .activate:
+            activateSelection()
+        case .cancel:
+            cancel()
         }
     }
 
@@ -101,6 +110,17 @@ final class AppWheelController {
 
     func close() {
         panel?.orderOut(nil)
+    }
+
+    private func activateSelection() {
+        guard let item = model.selectedApp else { return }
+        close()
+        if item.application.activate(options: [.activateAllWindows]) {
+            state.announce("Opened \(item.name)")
+            appActivated()
+        } else {
+            state.announce("macOS could not open \(item.name)")
+        }
     }
 
     private func makePanel() -> AppWheelPanel {
@@ -139,37 +159,48 @@ final class AppWheelController {
         let workspace = NSWorkspace.shared
         let frontmostPID = workspace.frontmostApplication?.processIdentifier
         let ownPID = ProcessInfo.processInfo.processIdentifier
-        var seenBundleIDs: Set<String> = []
-
-        let applications = workspace.runningApplications.filter {
-            $0.activationPolicy == .regular &&
-                !$0.isTerminated &&
-                $0.processIdentifier != ownPID
+        let applications = workspace.runningApplications
+        let snapshots = applications.map { application in
+            let bundleID = appWheelIdentifier(for: application)
+            return AppWheelApplication(
+                id: String(application.processIdentifier),
+                name: application.localizedName ?? bundleID,
+                bundleID: bundleID,
+                recentUse: recentUse(bundleID),
+                isRegular: application.activationPolicy == .regular,
+                isTerminated: application.isTerminated,
+                isCurrent: application.processIdentifier == frontmostPID,
+                isVibestick: application.processIdentifier == ownPID
+            )
         }
+        let applicationsByID = Dictionary(
+            uniqueKeysWithValues: applications.map {
+                (String($0.processIdentifier), $0)
+            }
+        )
 
-        return applications
-            .sorted { lhs, rhs in
-                if lhs.processIdentifier == frontmostPID { return true }
-                if rhs.processIdentifier == frontmostPID { return false }
-                return (lhs.localizedName ?? "").localizedStandardCompare(rhs.localizedName ?? "") == .orderedAscending
+        return AppWheelCandidates.make(from: snapshots).compactMap { candidate in
+            guard let application = applicationsByID[candidate.id] else {
+                return nil
             }
-            .compactMap { application in
-                let bundleID = application.bundleIdentifier ?? "pid.\(application.processIdentifier)"
-                guard seenBundleIDs.insert(bundleID).inserted else { return nil }
-                let name = application.localizedName ?? bundleID
-                let icon = application.icon
-                    ?? NSImage(systemSymbolName: "app", accessibilityDescription: name)
-                    ?? NSImage()
-                return AppWheelItem(
-                    id: application.processIdentifier,
-                    name: name,
-                    bundleID: bundleID,
-                    icon: icon,
-                    application: application,
-                    isFrontmost: application.processIdentifier == frontmostPID
+            let icon = application.icon
+                ?? NSImage(
+                    systemSymbolName: "app",
+                    accessibilityDescription: candidate.name
                 )
-            }
+                ?? NSImage()
+            return AppWheelItem(
+                id: application.processIdentifier,
+                name: candidate.name,
+                icon: icon,
+                application: application
+            )
+        }
     }
+}
+
+func appWheelIdentifier(for application: NSRunningApplication) -> String {
+    application.bundleIdentifier ?? "pid.\(application.processIdentifier)"
 }
 
 // MARK: - App wheel UI
@@ -211,10 +242,10 @@ struct AppWheelView: View {
                     .minimumScaleFactor(0.75)
                     .frame(maxWidth: 180)
 
-                Text(app.isFrontmost ? "CURRENT APP" : "READY TO OPEN")
+                Text("READY TO OPEN")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .tracking(1.2)
-                    .foregroundStyle(app.isFrontmost ? Color.mint : Color.white.opacity(0.62))
+                    .foregroundStyle(Color.white.opacity(0.62))
             } else {
                 Image(systemName: "circle.dotted.circle")
                     .font(.system(size: 30, weight: .light))
@@ -241,7 +272,7 @@ struct AppWheelView: View {
         let selected = model.selectedIndex == index
         let iconSize = baseIconSize(for: count)
 
-        return ZStack(alignment: .bottomTrailing) {
+        return ZStack {
             Image(nsImage: app.icon)
                 .resizable()
                 .interpolation(.high)
@@ -252,14 +283,6 @@ struct AppWheelView: View {
                     RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .fill(selected ? Color.accentColor.opacity(0.3) : Color.black.opacity(0.28))
                 )
-
-            if app.isFrontmost {
-                Circle()
-                    .fill(Color.mint)
-                    .frame(width: 10, height: 10)
-                    .overlay(Circle().stroke(Color.black.opacity(0.7), lineWidth: 2))
-                    .offset(x: -3, y: -3)
-            }
         }
         .scaleEffect(selected ? 1.18 : 1)
         .brightness(selected ? 0.08 : 0)

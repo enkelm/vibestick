@@ -719,6 +719,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     private var refreshTimer: Timer?
     private var appWheelHoldTimer: Timer?
     private var appWheelSessionActive = false
+    private var appWheelRecency = AppWheelRecency()
     private var commandRouter = CommandRouter()
     private var outputLifecycle = OutputLifecycle()
     private var diagnostics: [ControllerDiagnosticRecord] = []
@@ -732,8 +733,12 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         overlay = OverlayController(state: state, visual: visual)
         appWheel = AppWheelController(
             state: state,
-            appActivated: { [weak self] in self?.scheduleFocusRefresh() }
+            appActivated: { [weak self] in self?.scheduleFocusRefresh() },
+            recentUse: { [weak self] bundleID in
+                self?.appWheelRecency.rank(for: bundleID)
+            }
         )
+        recordUse(of: NSWorkspace.shared.frontmostApplication)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "⌘ Pad"
         statusItem.menu = makeMenu()
@@ -745,8 +750,14 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.refreshFocus() }
+        ) { [weak self] notification in
+            Task { @MainActor in
+                let application = notification.userInfo?[
+                    NSWorkspace.applicationUserInfoKey
+                ] as? NSRunningApplication
+                self?.recordUse(of: application)
+                self?.refreshFocus()
+            }
         }
 
         reader = ControllerReader(
@@ -1001,10 +1012,6 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     private func beginAppWheelSession() -> Bool {
         guard appWheel.open() else { return false }
         appWheelSessionActive = true
-        appWheel.updateSelection(
-            x: visual.axes[.leftX] ?? 0,
-            y: visual.axes[.leftY] ?? 0
-        )
         return true
     }
 
@@ -1051,21 +1058,22 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
 
     private func handleAppWheelInput(_ input: ControllerInput) {
         switch input {
-        case let .button(button, pressed: true):
-            if button == .a {
-                appWheel.confirmSelection()
-            } else if button == .b {
-                appWheel.cancel()
-            }
+        case let .button(button, pressed):
+            appWheel.handle(button: button, pressed: pressed)
         case let .axis(axis, _):
             guard axis == .leftX || axis == .leftY else { return }
             appWheel.updateSelection(
                 x: visual.axes[.leftX] ?? 0,
                 y: visual.axes[.leftY] ?? 0
             )
-        case .button, .trigger:
+        case .trigger:
             return
         }
+    }
+
+    private func recordUse(of application: NSRunningApplication?) {
+        guard let application else { return }
+        appWheelRecency.recordUse(of: appWheelIdentifier(for: application))
     }
 
     private func perform(_ action: BindingAction, from input: ControllerInput) {
