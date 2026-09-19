@@ -52,11 +52,7 @@ final class SlackPresetTests: XCTestCase {
     }
 
     func testSlackOverridesAreSparseAndResetRevealsPresetOrGlobalFallback() {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString + "/config.json"
-        )
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = ProfileStore(storageURL: url, loadFromDisk: false)
+        let store = makeStore()
         let globalA = BindingAction.key(
             KeyChord(keyCode: 1, modifiers: [.control])
         )
@@ -122,11 +118,7 @@ final class SlackPresetTests: XCTestCase {
     }
 
     func testSlackRetainsShareAndShortAndLongL3SystemMeanings() {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(
-            UUID().uuidString + "/config.json"
-        )
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = ProfileStore(storageURL: url, loadFromDisk: false)
+        let store = makeStore()
         let appOverride = BindingAction.key(
             KeyChord(keyCode: 0, modifiers: [.control])
         )
@@ -202,6 +194,19 @@ final class SlackPresetTests: XCTestCase {
                 binding: .share,
                 action: .overlay
             )
+        )
+    }
+
+    private func makeStore() -> ProfileStore {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            UUID().uuidString
+        )
+        addTeardownBlock {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        return ProfileStore(
+            storageURL: directory.appendingPathComponent("config.json"),
+            loadFromDisk: false
         )
     }
 }
