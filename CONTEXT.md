@@ -43,6 +43,10 @@ _Avoid_: App profile, automatic app switcher
 The translucent training view and keyboard-and-mouse editor for observing and overriding mappings by system, global, focused-app, and Herdr-layer scope; while merely visible, it consumes only Share and lets other controller input pass through.
 _Avoid_: App wheel, preset
 
+**Mouse mode**:
+An explicitly entered, app-independent controller mode for pointer movement, clicking, dragging, and scrolling in place of ordinary app bindings.
+_Avoid_: App profile, always-on pointer
+
 **App profile**:
 An operator's sparse set of button overrides for one app context, layered over that context's preset and the global defaults.
 _Avoid_: Complete keymap, preset
