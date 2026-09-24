@@ -309,19 +309,38 @@ public enum AppContextClassifier {
 public enum HerdrSurfaceIdentifier {
     public static func matches(
         focusedWindowTitle: String?,
-        focusedHerdrPaneTitles: [String]
+        focusedHerdrPaneTitles: [String],
+        focusedHerdrWorkspaceLabel: String? = nil
     ) -> Bool {
         guard let focusedWindowTitle else { return false }
         let normalizedWindowTitle = normalize(focusedWindowTitle)
-        let hasHerdrBrand = normalizedWindowTitle.hasPrefix("π > ") ||
-            normalizedWindowTitle.hasPrefix("π - ")
-        guard hasHerdrBrand else { return false }
-        return focusedHerdrPaneTitles.contains {
-            normalize($0) == normalizedWindowTitle
+        let surfaceTitle = removingHostPrefix(from: normalizedWindowTitle)
+        let hasHerdrBrand = surfaceTitle.hasPrefix("π > ") ||
+            surfaceTitle.hasPrefix("π - ")
+        if hasHerdrBrand {
+            return focusedHerdrPaneTitles.contains {
+                normalize($0) == surfaceTitle
+            }
         }
+
+        guard let focusedHerdrWorkspaceLabel,
+              !focusedHerdrWorkspaceLabel.isEmpty
+        else { return false }
+        let components = normalizedWindowTitle.components(separatedBy: ": ")
+        guard components.count == 2, !components[0].isEmpty else { return false }
+        return components[1] == normalize(focusedHerdrWorkspaceLabel)
     }
 
     private static func normalize(_ title: String) -> String {
         title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func removingHostPrefix(from title: String) -> String {
+        let components = title.components(separatedBy: ": ")
+        guard components.count == 2,
+              !components[0].isEmpty,
+              !components[1].isEmpty
+        else { return title }
+        return components[1]
     }
 }

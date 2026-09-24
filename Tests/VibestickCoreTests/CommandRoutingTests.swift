@@ -278,6 +278,69 @@ final class CommandRoutingTests: XCTestCase {
                 focusedHerdrPaneTitles: ["π > VIBESTICK"]
             )
         )
+        XCTAssertTrue(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: π > Confirm Contract",
+                focusedHerdrPaneTitles: ["π > Confirm Contract"]
+            )
+        )
+        XCTAssertTrue(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: π - .dotfiles",
+                focusedHerdrPaneTitles: ["π - .dotfiles"]
+            )
+        )
+        XCTAssertFalse(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: π > Different Agent",
+                focusedHerdrPaneTitles: ["π > Confirm Contract"]
+            )
+        )
+    }
+
+    func testHerdrSurfaceIdentificationCorrelatesManagedShellWindowWithWorkspace() {
+        XCTAssertTrue(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: vibestick",
+                focusedHerdrPaneTitles: [],
+                focusedHerdrWorkspaceLabel: "vibestick"
+            )
+        )
+        XCTAssertTrue(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: FleetIQ-WEB",
+                focusedHerdrPaneTitles: ["π :: Work on FleetIQ item 68558"],
+                focusedHerdrWorkspaceLabel: "FleetIQ-WEB"
+            )
+        )
+        XCTAssertTrue(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "  BALDUR: Vibestick  ",
+                focusedHerdrPaneTitles: [],
+                focusedHerdrWorkspaceLabel: "vibestick"
+            )
+        )
+        XCTAssertFalse(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: other-project",
+                focusedHerdrPaneTitles: [],
+                focusedHerdrWorkspaceLabel: "vibestick"
+            )
+        )
+        XCTAssertFalse(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "vibestick",
+                focusedHerdrPaneTitles: [],
+                focusedHerdrWorkspaceLabel: "vibestick"
+            )
+        )
+        XCTAssertFalse(
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: "baldur: vibestick: shell",
+                focusedHerdrPaneTitles: [],
+                focusedHerdrWorkspaceLabel: "vibestick"
+            )
+        )
     }
 
     func testRadialSelection() {

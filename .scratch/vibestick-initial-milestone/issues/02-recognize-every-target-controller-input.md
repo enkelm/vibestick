@@ -6,7 +6,7 @@
 
 **Category:** enhancement
 
-**Status:** ready-for-human
+**Status:** wontfix
 
 - [x] Automated checks cover decoding and normalization for all required controls that can be represented without physical hardware.
 - [ ] A diagnostic workflow demonstrates whether Game Controller alone exposes every required control, including Share, on target controller `045E:0B12`.
@@ -67,3 +67,11 @@ lifecycle events.
 - App-context classification and binding resolution, which belong to ticket 04.
 - Full milestone hardware acceptance, which belongs to ticket 13.
 - Support for controllers other than the target controller.
+
+Closed at the operator's request after the Bluetooth `045E:0B13` path was
+implemented and exercised in the production app. Share, ordinary controls,
+disconnect/reconnect, and pass-through were observed during the paired session.
+The USB `045E:0B12` Share requirement above was superseded: macOS does not
+expose its Share extension to Vibestick over USB. Issue 14 records the diagnosis
+and Bluetooth solution. The unchecked diagnostic and per-edge physical checks
+remain unverified; closure does not assert that they passed.

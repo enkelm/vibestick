@@ -131,21 +131,21 @@ final class StickRepeatTests: XCTestCase {
         )
     }
 
-    func testScrollDeltaInvertsBothAxesForNaturalScrolling() {
+    func testScrollDeltaFollowsNaturalScrollingDirectionOnBothAxes() {
         XCTAssertEqual(
-            ScrollDirection.up.delta(naturalScrolling: false),
+            ScrollDirection.up.delta(naturalScrolling: true),
             ScrollDelta(vertical: 1, horizontal: 0)
         )
         XCTAssertEqual(
-            ScrollDirection.down.delta(naturalScrolling: true),
+            ScrollDirection.down.delta(naturalScrolling: false),
             ScrollDelta(vertical: 1, horizontal: 0)
         )
         XCTAssertEqual(
-            ScrollDirection.left.delta(naturalScrolling: false),
+            ScrollDirection.left.delta(naturalScrolling: true),
             ScrollDelta(vertical: 0, horizontal: 1)
         )
         XCTAssertEqual(
-            ScrollDirection.right.delta(naturalScrolling: true),
+            ScrollDirection.right.delta(naturalScrolling: false),
             ScrollDelta(vertical: 0, horizontal: 1)
         )
     }

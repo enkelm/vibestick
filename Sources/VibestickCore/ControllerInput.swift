@@ -1,14 +1,35 @@
 import Foundation
 import GameController
 
+public enum TargetControllerTransport: Equatable {
+    case usb
+    case bluetoothLowEnergy
+}
+
 public enum TargetController {
     public static let vendorID = 0x045E
-    public static let productID = 0x0B12
+    public static let usbProductID = 0x0B12
+    public static let bluetoothProductID = 0x0B13
     public static let identifier = String(
         format: "%04X:%04X",
         vendorID,
-        productID
+        bluetoothProductID
     )
+
+    public static func transport(
+        vendorID: Int,
+        productID: Int
+    ) -> TargetControllerTransport? {
+        guard vendorID == self.vendorID else { return nil }
+        switch productID {
+        case usbProductID:
+            return .usb
+        case bluetoothProductID:
+            return .bluetoothLowEnergy
+        default:
+            return nil
+        }
+    }
 }
 
 public enum ControllerBackend: String, CaseIterable, Equatable {
@@ -39,12 +60,13 @@ public enum ControllerEvent: Equatable {
 
 /// Gives each physical control and lifecycle transition one production owner.
 ///
-/// Raw HID remains authoritative for the target controller's established GIP
-/// report and lifecycle. Game Controller contributes only Share, which the GIP
-/// report does not expose. Game Controller's other events are still available
-/// to diagnostics, but cannot duplicate production events.
+/// Raw HID remains authoritative for exact-device lifecycle. Over USB, it also
+/// owns the established GIP report while Game Controller contributes Share.
+/// Over Bluetooth, Game Controller owns every input because it exposes Share
+/// and a complete standard profile; raw events remain diagnostic-only.
 public final class ControllerEventNormalizer {
     private var connectedDeviceID: String?
+    private var transport: TargetControllerTransport?
     private var buttons: [PadButton: Bool] = [:]
     private var triggers: [PadButton: Double] = [:]
     private var axes: [StickAxis: Double] = [:]
@@ -61,9 +83,14 @@ public final class ControllerEventNormalizer {
         case let .connected(device):
             guard connectedDeviceID != device.id else { return nil }
             connectedDeviceID = device.id
+            transport = TargetController.transport(
+                vendorID: device.vendorID,
+                productID: device.productID
+            )
         case let .disconnected(device):
             guard connectedDeviceID == device.id else { return nil }
             connectedDeviceID = nil
+            transport = nil
             buttons.removeAll()
             triggers.removeAll()
             axes.removeAll()
@@ -85,8 +112,14 @@ public final class ControllerEventNormalizer {
         case .connected, .disconnected:
             return backend == .rawHID
         case let .input(.button(button, _)):
+            if transport == .bluetoothLowEnergy {
+                return backend == .gameController
+            }
             return backend == (button == .share ? .gameController : .rawHID)
         case .input(.trigger), .input(.axis):
+            if transport == .bluetoothLowEnergy {
+                return backend == .gameController
+            }
             return backend == .rawHID
         }
     }
@@ -181,11 +214,10 @@ public struct ControllerDiagnosticCoverage {
 
 /// One normalized stream for the target controller.
 ///
-/// IOHID owns exact-device discovery, connection lifecycle, and the established
-/// GIP report. Game Controller is provisionally paired only when exactly one
-/// target controller and one Xbox profile are present. It supplies Share and
-/// mirrors all other controls to the diagnostic callback so an operator can
-/// physically validate the pairing.
+/// IOHID owns exact-device discovery and connection lifecycle. Game Controller
+/// is provisionally paired only when exactly one target controller and one Xbox
+/// profile are present. Bluetooth uses its complete input profile; USB retains
+/// the established split ownership while its Share limitation is diagnosed.
 public final class ControllerReader {
     private enum ButtonKind {
         case digital
@@ -219,6 +251,9 @@ public final class ControllerReader {
         onEvent: @escaping (ControllerEvent) -> Void,
         onDiagnostic: @escaping (ControllerDiagnosticRecord) -> Void = { _ in }
     ) {
+        // Vibestick is a menu-bar accessory, so it is rarely frontmost. Share
+        // comes only from Game Controller and otherwise stops at the app boundary.
+        GCController.shouldMonitorBackgroundEvents = true
         self.onEvent = onEvent
         self.onDiagnostic = onDiagnostic
     }
@@ -252,21 +287,27 @@ public final class ControllerReader {
     }
 
     public var diagnosticSummary: String {
-        let targetCount = rawReader.connectedDevices().count
+        let targetDevices = rawReader.connectedDevices()
+        let targetCount = targetDevices.count
         let xboxProfiles = GCController.controllers().compactMap {
             $0.extendedGamepad as? GCXboxGamepad
         }
         let shareCount = xboxProfiles.compactMap(\.buttonShare).count
+        let ownership = targetDevices.first.flatMap {
+            TargetController.transport(vendorID: $0.vendorID, productID: $0.productID)
+        } == .bluetoothLowEnergy
+            ? "raw HID owns lifecycle; Game Controller owns every input"
+            : "raw HID owns lifecycle and standard controls; Game Controller owns Share"
         let correlation: String
         if targetCount == 1, xboxProfiles.count == 1 {
             correlation = "candidate available (GameController does not expose hardware identity)"
         } else if targetCount == 0 {
-            correlation = "waiting for target controller \(TargetController.identifier)"
+            correlation = "waiting for Bluetooth target 045E:0B13"
         } else {
             correlation = "ambiguous (\(targetCount) target controller, \(xboxProfiles.count) Xbox profiles)"
         }
         return """
-        Candidate backend: raw HID owns lifecycle and standard controls; Game Controller owns Share
+        Candidate backend: \(ownership)
         Target controller connections: \(targetCount)
         Xbox Game Controller profiles: \(xboxProfiles.count)
         Share elements: \(shareCount)

@@ -95,7 +95,7 @@ public extension ScrollDirection {
         case .right:
             direction = ScrollDelta(vertical: 0, horizontal: -1)
         }
-        let multiplier: Int32 = naturalScrolling ? -1 : 1
+        let multiplier: Int32 = naturalScrolling ? 1 : -1
         return ScrollDelta(
             vertical: direction.vertical * multiplier,
             horizontal: direction.horizontal * multiplier

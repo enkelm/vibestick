@@ -20,11 +20,14 @@ behavioral contract.
 ## Target environment
 
 - macOS 14 or later
-- Microsoft Xbox Wireless Controller with Share, currently identified as
-  `045E:0B12`
+- Microsoft Xbox Wireless Controller with Share connected through Bluetooth
+  Low Energy, identified as `045E:0B13`
 - TypeWhisper configured to toggle dictation with the physical backtick key
   plus Command, Control, Option, and Shift
 - Herdr's gamepad plugin disabled while Vibestick owns controller input
+
+USB `045E:0B12` is outside initial qualification because macOS does not expose
+its Share extension to Vibestick.
 
 The initial milestone is built locally from source. It does not include a
 signed or notarized public release.
@@ -72,10 +75,10 @@ rebindable or disableable.
 Dictation is represented as a plain keyboard shortcut, not a special provider
 integration. TypeWhisper owns transcription models and providers.
 
-The Share binding is a required capability for the target controller. The
-current raw report parser does not expose it, so implementation must validate
-Apple's `GCXboxGamepad.buttonShare` against the physical controller before
-settling the input backend.
+The Share binding is a required capability for the target controller. Physical
+validation established that `GCXboxGamepad.buttonShare` emits over Bluetooth
+but not USB. Bluetooth therefore uses GameController for every input while raw
+HID provides exact-device lifecycle and correlation.
 
 ## Herdr
 

@@ -11,7 +11,7 @@ and link or name them under Notes.
 - Git commit (copy from `environment.txt`):
 - Evidence directory:
 - Mac model and macOS:
-- Controller name and USB identifiers:
+- Controller name and Bluetooth identifiers:
 - Herdr version:
 - Ghostty version:
 - Slack version:
@@ -20,13 +20,15 @@ and link or name them under Notes.
 ## Preconditions
 
 - [ ] `result.txt` says `outcome=PASS`.
-- [ ] The connected controller is the target Xbox Wireless Controller with
-      Share (`045E:0B12`).
+- [ ] The target Xbox Wireless Controller with Share is connected through
+      Bluetooth Low Energy (`045E:0B13`) and its USB cable is disconnected.
 - [ ] TypeWhisper toggles from the physical
       Command-Control-Option-Shift-backtick shortcut.
 - [ ] I confirmed through Herdr's own configuration or status surface that
       Herdr's gamepad plugin is disabled.
 - [ ] Vibestick did not change or attempt to manage the Herdr plugin.
+
+USB `045E:0B12` is not qualified for Share and must not be used for this run.
 
 Plugin confirmation method and evidence:
 

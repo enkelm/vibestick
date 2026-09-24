@@ -1125,9 +1125,143 @@ private enum AccessibilityOnboarding {
 }
 
 @MainActor
+private final class GhosttyFocusObserver {
+    private let onFocusedSurfaceChanged: () -> Void
+    private var observer: AXObserver?
+    private var applicationElement: AXUIElement?
+    private var focusedWindowElement: AXUIElement?
+    private var processID: pid_t?
+
+    init(onFocusedSurfaceChanged: @escaping () -> Void) {
+        self.onFocusedSurfaceChanged = onFocusedSurfaceChanged
+    }
+
+    func follow(_ application: NSRunningApplication?) {
+        guard let application,
+              let bundleID = application.bundleIdentifier,
+              GhosttyPreset.matches(bundleID)
+        else {
+            stop()
+            return
+        }
+        guard processID != application.processIdentifier || observer == nil else {
+            return
+        }
+
+        stop()
+        var newObserver: AXObserver?
+        let result = AXObserverCreate(
+            application.processIdentifier,
+            { _, _, notification, context in
+                guard let context else { return }
+                let focusObserver = Unmanaged<GhosttyFocusObserver>
+                    .fromOpaque(context)
+                    .takeUnretainedValue()
+                Task { @MainActor in
+                    focusObserver.handle(notification)
+                }
+            },
+            &newObserver
+        )
+        guard result == .success, let newObserver else { return }
+
+        let applicationElement = AXUIElementCreateApplication(
+            application.processIdentifier
+        )
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard AXObserverAddNotification(
+            newObserver,
+            applicationElement,
+            kAXFocusedWindowChangedNotification as CFString,
+            context
+        ) == .success
+        else { return }
+
+        observer = newObserver
+        self.applicationElement = applicationElement
+        processID = application.processIdentifier
+        CFRunLoopAddSource(
+            CFRunLoopGetMain(),
+            AXObserverGetRunLoopSource(newObserver),
+            .commonModes
+        )
+        observeFocusedWindow()
+    }
+
+    func stop() {
+        if let observer {
+            if let focusedWindowElement {
+                AXObserverRemoveNotification(
+                    observer,
+                    focusedWindowElement,
+                    kAXTitleChangedNotification as CFString
+                )
+            }
+            if let applicationElement {
+                AXObserverRemoveNotification(
+                    observer,
+                    applicationElement,
+                    kAXFocusedWindowChangedNotification as CFString
+                )
+            }
+            CFRunLoopRemoveSource(
+                CFRunLoopGetMain(),
+                AXObserverGetRunLoopSource(observer),
+                .commonModes
+            )
+        }
+        focusedWindowElement = nil
+        applicationElement = nil
+        observer = nil
+        processID = nil
+    }
+
+    private func handle(_ notification: CFString) {
+        if notification == kAXFocusedWindowChangedNotification as CFString {
+            observeFocusedWindow()
+        }
+        onFocusedSurfaceChanged()
+    }
+
+    private func observeFocusedWindow() {
+        guard let observer, let applicationElement else { return }
+        if let focusedWindowElement {
+            AXObserverRemoveNotification(
+                observer,
+                focusedWindowElement,
+                kAXTitleChangedNotification as CFString
+            )
+        }
+        focusedWindowElement = nil
+
+        var focusedWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            applicationElement,
+            kAXFocusedWindowAttribute as CFString,
+            &focusedWindow
+        ) == .success,
+              let focusedWindow
+        else { return }
+        let windowElement = focusedWindow as! AXUIElement
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard AXObserverAddNotification(
+            observer,
+            windowElement,
+            kAXTitleChangedNotification as CFString,
+            context
+        ) == .success
+        else { return }
+        focusedWindowElement = windowElement
+    }
+}
+
+@MainActor
 final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let state = ProfileStore()
     let trainer = BindingsOverlayTrainer()
+    private lazy var ghosttyFocusObserver = GhosttyFocusObserver {
+        [weak self] in self?.refreshFocus()
+    }
     private var reader: ControllerReader!
     private var actions: MacActions!
     private var overlay: OverlayController!
@@ -1227,6 +1361,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
 
     func applicationWillTerminate(_ notification: Notification) {
         applyLifecycle(.shutdown, clearVisualization: true)
+        ghosttyFocusObserver.stop()
         refreshTimer?.invalidate()
         if let workspaceObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
@@ -1317,6 +1452,7 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
         \(permission)
         Output: \(outputLifecycle.isPaused ? "emergency pause" : "active")
         App context: \(state.describe(state.focusedApp))
+        \(state.herdrDetectionDiagnostic())
         App wheel: always active · hold L3
         Owner: standalone Vibestick\(configuration)
 
@@ -1599,6 +1735,9 @@ final class ApplicationCoordinator: NSObject, NSApplicationDelegate, NSMenuDeleg
     }
 
     private func refreshFocus() {
+        ghosttyFocusObserver.follow(
+            NSWorkspace.shared.frontmostApplication
+        )
         state.refreshFocus()
         overlay?.follow(state.focusedApp)
         applyLifecycle(.appContextChanged(state.focusedApp))

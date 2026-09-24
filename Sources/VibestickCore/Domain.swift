@@ -162,22 +162,25 @@ final class RawHIDControllerReader {
         // Xbox One/Series devices expose the GIP report as vendor-defined HID.
         // Match both usages used by macOS. Excluding Apple's synthetic HID
         // device prevents a second logical copy of every physical input.
-        let matches: [[String: Any]] = [
-            [
-                kIOHIDVendorIDKey as String: TargetController.vendorID,
-                kIOHIDProductIDKey as String: TargetController.productID,
-                kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
-                kIOHIDDeviceUsageKey as String: kHIDUsage_GD_GamePad,
-                "GCSyntheticDevice": kCFBooleanFalse as Any,
-            ],
-            [
-                kIOHIDVendorIDKey as String: TargetController.vendorID,
-                kIOHIDProductIDKey as String: TargetController.productID,
-                kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
-                kIOHIDDeviceUsageKey as String: kHIDUsage_GD_Joystick,
-                "GCSyntheticDevice": kCFBooleanFalse as Any,
-            ],
+        let productIDs = [
+            TargetController.usbProductID,
+            TargetController.bluetoothProductID,
         ]
+        let usages = [
+            kHIDUsage_GD_GamePad,
+            kHIDUsage_GD_Joystick,
+        ]
+        let matches: [[String: Any]] = productIDs.flatMap { productID in
+            usages.map { usage in
+                [
+                    kIOHIDVendorIDKey as String: TargetController.vendorID,
+                    kIOHIDProductIDKey as String: productID,
+                    kIOHIDDeviceUsagePageKey as String: kHIDPage_GenericDesktop,
+                    kIOHIDDeviceUsageKey as String: usage,
+                    "GCSyntheticDevice": kCFBooleanFalse as Any,
+                ]
+            }
+        }
         IOHIDManagerSetDeviceMatchingMultiple(manager, matches as CFArray)
     }
 
@@ -655,6 +658,11 @@ public enum GhosttyPreset {
 }
 
 private enum HerdrSurfaceDetector {
+    struct Detection {
+        let matches: Bool
+        let diagnosticSummary: String
+    }
+
     private struct Snapshot: Decodable {
         struct Pane: Decodable {
             let paneID: String
@@ -667,12 +675,25 @@ private enum HerdrSurfaceDetector {
                 case terminalTitleStripped = "terminal_title_stripped"
             }
         }
+        struct Workspace: Decodable {
+            let workspaceID: String
+            let label: String
+
+            enum CodingKeys: String, CodingKey {
+                case workspaceID = "workspace_id"
+                case label
+            }
+        }
         let focusedPaneID: String?
+        let focusedWorkspaceID: String?
         let panes: [Pane]
+        let workspaces: [Workspace]?
 
         enum CodingKeys: String, CodingKey {
             case focusedPaneID = "focused_pane_id"
+            case focusedWorkspaceID = "focused_workspace_id"
             case panes
+            case workspaces
         }
     }
 
@@ -683,21 +704,65 @@ private enum HerdrSurfaceDetector {
         let result: Result
     }
 
-    public static func focusedSurfaceIsHerdr() -> Bool {
+    private struct Evidence {
+        let windowTitle: String?
+        let paneID: String?
+        let paneTitles: [String]
+        let workspaceLabel: String?
+
+        var matches: Bool {
+            HerdrSurfaceIdentifier.matches(
+                focusedWindowTitle: windowTitle,
+                focusedHerdrPaneTitles: paneTitles,
+                focusedHerdrWorkspaceLabel: workspaceLabel
+            )
+        }
+    }
+
+    public static func detect() -> Detection {
+        guard let evidence = evidence() else {
+            return Detection(
+                matches: false,
+                diagnosticSummary: "Herdr detection: no decodable focused Ghostty snapshot"
+            )
+        }
+        let titles = evidence.paneTitles.isEmpty
+            ? "<none>"
+            : evidence.paneTitles.joined(separator: " | ")
+        return Detection(
+            matches: evidence.matches,
+            diagnosticSummary: """
+            Herdr detection: \(evidence.matches ? "matched" : "not matched")
+            Window title: \(evidence.windowTitle ?? "<none>")
+            Focused Herdr pane: \(evidence.paneID ?? "<none>")
+            Focused Herdr pane titles: \(titles)
+            Focused Herdr workspace: \(evidence.workspaceLabel ?? "<none>")
+            """
+        )
+    }
+
+    private static func evidence() -> Evidence? {
         guard let application = NSWorkspace.shared.frontmostApplication,
               application.localizedName?.localizedCaseInsensitiveContains("ghostty") == true,
               let data = snapshotData(),
               let response = try? JSONDecoder().decode(Response.self, from: data)
-        else { return false }
+        else { return nil }
 
         let snapshot = response.result.snapshot
         let focusedPaneTitles = snapshot.panes
             .first { $0.paneID == snapshot.focusedPaneID }
             .map { [$0.terminalTitle, $0.terminalTitleStripped].compactMap { $0 } }
             ?? []
-        return HerdrSurfaceIdentifier.matches(
-            focusedWindowTitle: focusedWindowTitle(processID: application.processIdentifier),
-            focusedHerdrPaneTitles: focusedPaneTitles
+        let focusedWorkspaceLabel = snapshot.workspaces?
+            .first { $0.workspaceID == snapshot.focusedWorkspaceID }?
+            .label
+        return Evidence(
+            windowTitle: focusedWindowTitle(
+                processID: application.processIdentifier
+            ),
+            paneID: snapshot.focusedPaneID,
+            paneTitles: focusedPaneTitles,
+            workspaceLabel: focusedWorkspaceLabel
         )
     }
 
@@ -843,6 +908,7 @@ public final class ProfileStore: ObservableObject {
     @Published public private(set) var isEditingBindings = false
 
     private let storageURL: URL?
+    private var lastHerdrDetectionDiagnostic = "Herdr detection: not checked"
 
     public var editingGlobal: Bool {
         get { editingSection == .globalFallbacks }
@@ -863,10 +929,12 @@ public final class ProfileStore: ObservableObject {
               let applicationBundleID = application.bundleIdentifier,
               applicationBundleID != bundleID
         else { return }
+        let herdrDetection = HerdrSurfaceDetector.detect()
+        lastHerdrDetectionDiagnostic = herdrDetection.diagnosticSummary
         focusedApp = AppContextClassifier.classify(
             bundleID: applicationBundleID,
             name: application.localizedName ?? applicationBundleID,
-            herdrDetected: HerdrSurfaceDetector.focusedSurfaceIsHerdr()
+            herdrDetected: herdrDetection.matches
         )
         if !isEditingBindings {
             editingApp = focusedApp
@@ -1118,6 +1186,10 @@ public final class ProfileStore: ObservableObject {
 
     public func setAccessibility(_ granted: Bool = CGPreflightPostEventAccess()) {
         accessibilityGranted = granted
+    }
+
+    public func herdrDetectionDiagnostic() -> String {
+        lastHerdrDetectionDiagnostic
     }
 
     public func announce(_ message: String) {

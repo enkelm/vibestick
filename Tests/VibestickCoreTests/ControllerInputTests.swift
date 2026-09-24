@@ -1,7 +1,30 @@
+import GameController
 import XCTest
 @testable import VibestickCore
 
 final class ControllerInputTests: XCTestCase {
+    func testTargetControllerRecognizesQualifiedTransports() {
+        XCTAssertEqual(
+            TargetController.transport(vendorID: 0x045E, productID: 0x0B12),
+            .usb
+        )
+        XCTAssertEqual(
+            TargetController.transport(vendorID: 0x045E, productID: 0x0B13),
+            .bluetoothLowEnergy
+        )
+        XCTAssertEqual(TargetController.identifier, "045E:0B13")
+        XCTAssertNil(TargetController.transport(vendorID: 0x045E, productID: 0xFFFF))
+        XCTAssertNil(TargetController.transport(vendorID: 0xFFFF, productID: 0x0B13))
+    }
+
+    func testReaderEnablesBackgroundGameControllerEvents() {
+        GCController.shouldMonitorBackgroundEvents = false
+
+        _ = ControllerReader(onEvent: { _ in })
+
+        XCTAssertTrue(GCController.shouldMonitorBackgroundEvents)
+    }
+
     func testXboxReportDecodesEveryRawButtonAndItsRelease() throws {
         let expected: [(bit: Int, button: PadButton)] = [
             (2, .start), (3, .back),
@@ -73,6 +96,34 @@ final class ControllerInputTests: XCTestCase {
         XCTAssertEqual(normalizer.accept(share, from: .gameController), share)
         XCTAssertEqual(normalizer.accept(.connected(device), from: .rawHID), .connected(device))
         XCTAssertNil(normalizer.accept(.connected(device), from: .gameController))
+        XCTAssertEqual(
+            normalizer.accept(.disconnected(device), from: .rawHID),
+            .disconnected(device)
+        )
+        XCTAssertNil(normalizer.accept(.disconnected(device), from: .gameController))
+    }
+
+    func testBluetoothUsesGameControllerForEveryInputAndRawHIDForLifecycle() {
+        let normalizer = ControllerEventNormalizer()
+        let device = ConnectedDevice(
+            id: "bluetooth-target",
+            name: "Xbox Wireless Controller",
+            vendorID: 0x045E,
+            productID: 0x0B13
+        )
+        let events: [ControllerEvent] = [
+            .input(.button(.a, pressed: true)),
+            .input(.button(.share, pressed: true)),
+            .input(.trigger(.lt, value: 0.75)),
+            .input(.axis(.leftX, value: 0.5)),
+        ]
+
+        XCTAssertEqual(normalizer.accept(.connected(device), from: .rawHID), .connected(device))
+        XCTAssertNil(normalizer.accept(.connected(device), from: .gameController))
+        for event in events {
+            XCTAssertNil(normalizer.accept(event, from: .rawHID))
+            XCTAssertEqual(normalizer.accept(event, from: .gameController), event)
+        }
         XCTAssertEqual(
             normalizer.accept(.disconnected(device), from: .rawHID),
             .disconnected(device)

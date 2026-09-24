@@ -4,7 +4,7 @@
 
 **Blocked by:** 07: Complete the explicit app wheel; 08: Deliver the Slack command surface; 09: Deliver the Herdr command surface and Herdr layer; 10: Add repeatable stick navigation and scrolling; 11: Make the bindings overlay a live pass-through trainer; 12: Complete bindings editing across every scope.
 
-**Status:** ready-for-human
+**Status:** wontfix
 
 - [x] One documented workflow builds from source and runs all automated checks listed in the milestone specification.
 - [ ] The physical workflow verifies Share, short and long L3, Herdr base and layer commands, navigation, scrolling, Ghostty isolation, Slack commands, and unknown-app safety.
@@ -18,7 +18,7 @@
 
 The repeatable automated workflow is implemented by `acceptance.sh` and
 documented in `docs/initial-milestone-acceptance.md`. A qualification run
-completed successfully with all 82 tests passing and a release
+completed successfully with all 83 tests passing and a release
 `Vibestick.app` built from source.
 
 The generated `manual-checklist.md` covers every physical and lifecycle check
@@ -27,3 +27,28 @@ without Vibestick managing it. Those checks require the target controller and
 operator-controlled Accessibility, Herdr, Ghostty, Slack, and TypeWhisper
 environments, so the issue is handed to a human and is not yet declared
 complete.
+
+The physical run for commit `37f031cf6267054b0b54d44df10c0ce501b45dd7`
+failed at Share: the target USB controller's Share button did not toggle the
+bindings overlay. Long L3 did open the app wheel, proving that the controller
+and raw-HID path were active. Accessibility was granted before the denied-state
+section finished, so that section must also be repeated in a fresh run.
+
+Diagnosis is recorded in issue 14. In summary, the controller declares a
+44-byte GIP input payload, but Apple's `XboxSeriesXGamepad` HID service exposes
+only the header and 14-byte standard payload. The omitted extension contains
+Share. GameController exposes a non-nil `buttonShare`, but it emitted no Share
+event under either supported gesture-delivery policy while ordinary A events
+worked. The milestone remains unqualified.
+
+Closed at the operator's request after the paired session demonstrated the
+Bluetooth controller, Accessibility-granted output, system gestures, bindings
+editing, Herdr and ordinary Ghostty controls, Slack bindings, and corrected
+right-stick scrolling in Slack. This closes the initial-milestone ticket set,
+**not** the formal qualification: no clean-revision acceptance run with a
+complete manual checklist was recorded. The Accessibility-denied section,
+unknown-app safety, lifecycle/context transitions, configuration migration,
+Herdr Back-layer cancellation/timeout, and post-fix right-stick behavior in
+every context remain unverified physically. Keep their checkboxes unchecked;
+handle any later bug reports as independent work rather than reopening this
+milestone.

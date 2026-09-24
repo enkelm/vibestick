@@ -13,11 +13,16 @@ not a physical qualification.
 ## Target setup
 
 - macOS 14 or later.
-- Microsoft Xbox Wireless Controller with Share, USB identifiers `045E:0B12`.
+- Microsoft Xbox Wireless Controller with Share connected through
+  Bluetooth Low Energy (`045E:0B13`).
 - TypeWhisper configured for Command-Control-Option-Shift-backtick.
 - Herdr available in Ghostty.
 - Slack available.
 - Herdr's gamepad plugin disabled by the operator before Vibestick starts.
+
+Disconnect the controller's USB cable before starting acceptance. USB
+`045E:0B12` is not qualified for Share because macOS omits the controller's
+Share extension from the USB input exposed to applications.
 
 Vibestick and this workflow do not inspect, disable, enable, or otherwise
 manage Herdr's plugin. The operator must confirm its state through Herdr's own
@@ -60,7 +65,7 @@ they are the reproducible record of what failed.
 
 | Required evidence | Test coverage |
 | --- | --- |
-| Xbox input decoding and unique backend ownership | `ControllerInputTests` |
+| Target identity and transport-specific unique backend ownership | `ControllerInputTests` |
 | Gesture precedence and short/long L3 | `SystemGestureRoutingTests` |
 | Back-layer hold, arm, cancellation, and timeout | `HerdrCommandRoutingTests` |
 | App-context and profile resolution; unknown-app safety | `CommandRoutingTests` |
@@ -72,8 +77,11 @@ they are the reproducible record of what failed.
 | Complete Slack preset | `SlackPresetTests` |
 | Acceptance command success and failure evidence | `AcceptanceWorkflowTests` |
 
-`build.sh` then compiles the release executable from source, assembles
-`Vibestick.app`, and ad-hoc signs the local app.
+`build.sh` then compiles the release executable from source and assembles
+`Vibestick.app`. It signs with the trusted local `Vibestick Local Code Signing`
+identity when available (or an explicit `VIBESTICK_CODESIGN_IDENTITY`);
+otherwise it falls back to ad-hoc signing, which requires a fresh Accessibility
+grant after rebuilding.
 
 ## Run the physical workflow
 

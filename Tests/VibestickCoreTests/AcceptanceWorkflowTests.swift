@@ -10,9 +10,27 @@ final class AcceptanceWorkflowTests: XCTestCase {
         let process = try fixture.run(evidenceURL: evidenceURL)
 
         XCTAssertEqual(process.terminationStatus, 0)
+        let invocations = try fixture.invocations()
         XCTAssertEqual(
-            try fixture.invocations(),
-            ["--version", "package clean", "test", "build"]
+            Array(invocations.prefix(5)),
+            [
+                "--version",
+                "package clean",
+                "test",
+                "build -c release",
+                "build -c release --show-bin-path",
+            ]
+        )
+        let codesignInvocation = try XCTUnwrap(invocations.last)
+        XCTAssertTrue(
+            codesignInvocation.hasPrefix(
+                "codesign --force --deep --sign - "
+            )
+        )
+        XCTAssertTrue(
+            codesignInvocation.hasSuffix(
+                "/\(fixture.root.lastPathComponent)/Vibestick.app"
+            )
         )
         XCTAssertEqual(
             try String(contentsOf: evidenceURL.appendingPathComponent("result.txt")),
@@ -23,12 +41,44 @@ final class AcceptanceWorkflowTests: XCTestCase {
                 atPath: evidenceURL.appendingPathComponent("manual-checklist.md").path
             )
         )
+        let checklist = try String(
+            contentsOf: evidenceURL.appendingPathComponent("manual-checklist.md")
+        )
+        XCTAssertTrue(checklist.contains("Bluetooth Low Energy (`045E:0B13`)"))
+        XCTAssertTrue(checklist.contains("USB `045E:0B12` is not qualified for Share"))
         let log = try String(
             contentsOf: evidenceURL.appendingPathComponent("workflow.log")
         )
         XCTAssertTrue(log.contains("Clean source tree"))
         XCTAssertTrue(log.contains("Automated tests"))
         XCTAssertTrue(log.contains("Source-built application"))
+    }
+
+    func testWorkflowUsesConfiguredCodeSigningIdentity() throws {
+        let fixture = try AcceptanceWorkflowFixture()
+        defer { fixture.remove() }
+        let evidenceURL = fixture.root.appendingPathComponent("evidence")
+
+        let process = try fixture.run(
+            evidenceURL: evidenceURL,
+            environment: [
+                "VIBESTICK_CODESIGN_IDENTITY": "Vibestick Local Code Signing"
+            ]
+        )
+
+        XCTAssertEqual(process.terminationStatus, 0)
+        let codesignInvocation = try XCTUnwrap(try fixture.invocations().last)
+        XCTAssertTrue(
+            codesignInvocation.hasPrefix(
+                "codesign --force --deep --sign Vibestick Local Code Signing " +
+                    "--identifier com.enkelm.vibestick "
+            )
+        )
+        XCTAssertTrue(
+            codesignInvocation.hasSuffix(
+                "/\(fixture.root.lastPathComponent)/Vibestick.app"
+            )
+        )
     }
 
     func testWorkflowStopsOnFailureAndRecordsFailingEvidence() throws {
@@ -96,6 +146,7 @@ private final class AcceptanceWorkflowFixture {
             to: root.appendingPathComponent("acceptance.sh")
         )
         try copyChecklist(from: projectRoot)
+        try copyBuildFiles(from: projectRoot)
         try writeExecutables()
     }
 
@@ -121,6 +172,10 @@ private final class AcceptanceWorkflowFixture {
             "/bin",
         ].joined(separator: ":")
         environment["ACCEPTANCE_INVOCATIONS"] = invocationLog.path
+        environment["ACCEPTANCE_BUILD_BIN"] = root
+            .appendingPathComponent("fixture-build-bin")
+            .path
+        environment["VIBESTICK_CODESIGN_IDENTITY"] = "-"
         environment.merge(additions) { _, addition in addition }
         process.environment = environment
 
@@ -146,6 +201,31 @@ private final class AcceptanceWorkflowFixture {
         )
     }
 
+    private func copyBuildFiles(from projectRoot: URL) throws {
+        try fileManager.copyItem(
+            at: projectRoot.appendingPathComponent("build.sh"),
+            to: root.appendingPathComponent("build.sh")
+        )
+        let appResources = root.appendingPathComponent("App")
+        try fileManager.createDirectory(
+            at: appResources,
+            withIntermediateDirectories: true
+        )
+        try fileManager.copyItem(
+            at: projectRoot.appendingPathComponent("App/Info.plist"),
+            to: appResources.appendingPathComponent("Info.plist")
+        )
+        let buildBin = root.appendingPathComponent("fixture-build-bin")
+        try fileManager.createDirectory(
+            at: buildBin,
+            withIntermediateDirectories: true
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: buildBin.appendingPathComponent("Vibestick")
+        )
+    }
+
     private func writeExecutables() throws {
         let bin = root.appendingPathComponent("bin")
         try fileManager.createDirectory(at: bin, withIntermediateDirectories: true)
@@ -155,6 +235,8 @@ private final class AcceptanceWorkflowFixture {
             print -r -- "$*" >> "$ACCEPTANCE_INVOCATIONS"
             if [[ "$*" == "--version" ]]; then
                 print "Swift version fixture"
+            elif [[ "$*" == "build -c release --show-bin-path" ]]; then
+                print "$ACCEPTANCE_BUILD_BIN"
             elif [[ "$*" == "test" && "${FAIL_SWIFT_TEST:-0}" == "1" ]]; then
                 print -u2 "fixture test failure"
                 exit 23
@@ -177,12 +259,9 @@ private final class AcceptanceWorkflowFixture {
         try writeExecutable(
             """
             #!/bin/zsh
-            print -r -- "build" >> "$ACCEPTANCE_INVOCATIONS"
-            mkdir -p "$PWD/Vibestick.app/Contents/MacOS"
-            touch "$PWD/Vibestick.app/Contents/MacOS/Vibestick"
-            chmod +x "$PWD/Vibestick.app/Contents/MacOS/Vibestick"
+            print -r -- "codesign $*" >> "$ACCEPTANCE_INVOCATIONS"
             """,
-            to: root.appendingPathComponent("build.sh")
+            to: bin.appendingPathComponent("codesign")
         )
     }
 
